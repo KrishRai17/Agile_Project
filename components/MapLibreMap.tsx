@@ -5,6 +5,7 @@ import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Plus, Minus, Crosshair } from "lucide-react";
 import { DriverCar, LocationItem, AcceptedRideRoute } from "@/lib/mapData";
+import { metersBetween } from "@/lib/campus";
 
 interface MapLibreMapProps {
   pickup: LocationItem | null;
@@ -910,12 +911,40 @@ export default function MapLibreMap({
     }
   }, [pickup, dropoff, mapLoaded]);
 
-  // Sync accepted ride markers:
+  // Sync accepted ride markers with smooth linear interpolation (lerp) on GPS updates:
   // Phase 1 (Pickup): Driver Marker + Passenger Pickup Marker
   // Phase 2 (Dropoff): Driver Marker + Final Destination Marker
   useEffect(() => {
     if (!mapLoaded || !mapRef.current) return;
     const map = mapRef.current;
+    let rafDriver: number | null = null;
+    let rafPickup: number | null = null;
+
+    const animateMarker = (
+      marker: maplibregl.Marker,
+      targetLng: number,
+      targetLat: number,
+      setRaf: (id: number) => void
+    ) => {
+      const start = marker.getLngLat();
+      const dLng = targetLng - start.lng;
+      const dLat = targetLat - start.lat;
+      if (Math.abs(dLng) < 0.00001 && Math.abs(dLat) < 0.00001) {
+        marker.setLngLat([targetLng, targetLat]);
+        return;
+      }
+      const durationMs = 550;
+      const t0 = performance.now();
+      const step = (now: number) => {
+        const progress = Math.min(1, (now - t0) / durationMs);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        marker.setLngLat([start.lng + dLng * eased, start.lat + dLat * eased]);
+        if (progress < 1) {
+          setRaf(requestAnimationFrame(step));
+        }
+      };
+      setRaf(requestAnimationFrame(step));
+    };
 
     if (acceptedRideRoute) {
       // 1. Driver Start / Live Marker (Always active during the ride)
@@ -928,10 +957,14 @@ export default function MapLibreMap({
           .setLngLat([acceptedRideRoute.driverLocation.lng, acceptedRideRoute.driverLocation.lat])
           .addTo(map);
       } else {
-        acceptedDriverMarkerRef.current.setLngLat([
+        animateMarker(
+          acceptedDriverMarkerRef.current,
           acceptedRideRoute.driverLocation.lng,
           acceptedRideRoute.driverLocation.lat,
-        ]);
+          (id) => {
+            rafDriver = id;
+          }
+        );
       }
 
       // 2. Pickup Marker: Visible during "pickup" phase
@@ -942,10 +975,14 @@ export default function MapLibreMap({
             .setLngLat([acceptedRideRoute.pickupLocation.lng, acceptedRideRoute.pickupLocation.lat])
             .addTo(map);
         } else {
-          acceptedPickupMarkerRef.current.setLngLat([
+          animateMarker(
+            acceptedPickupMarkerRef.current,
             acceptedRideRoute.pickupLocation.lng,
             acceptedRideRoute.pickupLocation.lat,
-          ]);
+            (id) => {
+              rafPickup = id;
+            }
+          );
         }
       } else {
         if (acceptedPickupMarkerRef.current) {
@@ -989,20 +1026,19 @@ export default function MapLibreMap({
     }
 
     return () => {
-      if (acceptedDriverMarkerRef.current) {
-        acceptedDriverMarkerRef.current.remove();
-        acceptedDriverMarkerRef.current = null;
-      }
-      if (acceptedPickupMarkerRef.current) {
-        acceptedPickupMarkerRef.current.remove();
-        acceptedPickupMarkerRef.current = null;
-      }
-      if (acceptedDropoffMarkerRef.current) {
-        acceptedDropoffMarkerRef.current.remove();
-        acceptedDropoffMarkerRef.current = null;
-      }
+      if (rafDriver !== null) cancelAnimationFrame(rafDriver);
+      if (rafPickup !== null) cancelAnimationFrame(rafPickup);
     };
   }, [acceptedRideRoute, activePhase, mapLoaded]);
+
+  const lastFittedPhaseKeyRef = useRef<string | null>(null);
+  const lastRoutedCoordsRef = useRef<{
+    phaseKey: string;
+    startLng: number;
+    startLat: number;
+    endLng: number;
+    endLat: number;
+  } | null>(null);
 
   // Route calculation and road geometry
   useEffect(() => {
@@ -1017,6 +1053,37 @@ export default function MapLibreMap({
         properties: {},
         geometry: { type: "LineString", coordinates },
       });
+
+    const fetchDirectBrowserOsrm = async (
+      sLng: number,
+      sLat: number,
+      eLng: number,
+      eLat: number,
+      signal: AbortSignal
+    ): Promise<{ distanceKm: number; durationMin: number; coordinates: [number, number][] } | null> => {
+      const endpoints = [
+        `https://routing.openstreetmap.de/routed-car/route/v1/driving/${sLng},${sLat};${eLng},${eLat}?overview=full&geometries=geojson`,
+        `https://router.project-osrm.org/route/v1/driving/${sLng},${sLat};${eLng},${eLat}?overview=full&geometries=geojson`,
+      ];
+      for (const endpoint of endpoints) {
+        try {
+          const r = await fetch(endpoint, { signal });
+          if (!r.ok) continue;
+          const d = await r.json();
+          const rt = d?.routes?.[0];
+          if (rt?.geometry?.coordinates && rt.distance > 0) {
+            return {
+              distanceKm: Math.round((rt.distance / 1000) * 10) / 10,
+              durationMin: Math.max(1, Math.round(rt.duration / 60)),
+              coordinates: rt.geometry.coordinates as [number, number][],
+            };
+          }
+        } catch {
+          // try next endpoint
+        }
+      }
+      return null;
+    };
 
     // 1. If an accepted ride is active:
     // Phase 1 ("pickup"): Route Driver -> Passenger Pickup
@@ -1033,9 +1100,6 @@ export default function MapLibreMap({
         map.setPaintProperty("route-casing", "line-color", "#ffffff");
         map.setPaintProperty("route-casing", "line-width", 10);
       }
-
-      const bounds = new maplibregl.LngLatBounds();
-      bounds.extend([acceptedRideRoute.driverLocation.lng, acceptedRideRoute.driverLocation.lat]);
 
       let startLng: number;
       let startLat: number;
@@ -1056,38 +1120,72 @@ export default function MapLibreMap({
         endLat = acceptedRideRoute.dropoffLocation.lat;
       }
 
-      bounds.extend([endLng, endLat]);
-      map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 800 });
+      const phaseKey = `${acceptedRideRoute.requestId ?? "active"}:${activePhase}`;
+      if (lastFittedPhaseKeyRef.current !== phaseKey) {
+        lastFittedPhaseKeyRef.current = phaseKey;
+        const bounds = new maplibregl.LngLatBounds();
+        bounds.extend([startLng, startLat]);
+        bounds.extend([endLng, endLat]);
+        map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 800 });
+      }
+
+      const prevRouted = lastRoutedCoordsRef.current;
+      if (
+        prevRouted &&
+        prevRouted.phaseKey === phaseKey &&
+        Math.abs(prevRouted.startLng - startLng) < 0.00015 &&
+        Math.abs(prevRouted.startLat - startLat) < 0.00015 &&
+        Math.abs(prevRouted.endLng - endLng) < 0.00015 &&
+        Math.abs(prevRouted.endLat - endLat) < 0.00015
+      ) {
+        return;
+      }
+      lastRoutedCoordsRef.current = { phaseKey, startLng, startLat, endLng, endLat };
 
       const controller = new AbortController();
       const points = `${startLng},${startLat};${endLng},${endLat}`;
       const url = `/api/route?points=${points}`;
 
-      fetch(url, { signal: controller.signal })
-        .then((res) => {
-          if (!res.ok) throw new Error("Route fetch failed");
-          return res.json();
-        })
-        .then((data) => {
-          if (Array.isArray(data.coordinates) && data.coordinates.length > 0) {
-            setLine(data.coordinates);
+      (async () => {
+        try {
+          const res = await fetch(url, { signal: controller.signal });
+          if (res.ok) {
+            const data = await res.json();
+            if (!data.isFallback && Array.isArray(data.coordinates) && data.coordinates.length > 0) {
+              setLine(data.coordinates);
+              setAcceptedRouteDetails({
+                distanceKm: data.distanceKm,
+                durationMin: data.durationMin,
+                legs: data.legs,
+              });
+              return;
+            }
+          }
+          // Try direct client-side OSRM road routing if server returned fallback or failed
+          const direct = await fetchDirectBrowserOsrm(
+            startLng,
+            startLat,
+            endLng,
+            endLat,
+            controller.signal
+          );
+          if (direct) {
+            setLine(direct.coordinates);
             setAcceptedRouteDetails({
-              distanceKm: data.distanceKm,
-              durationMin: data.durationMin,
-              legs: data.legs,
+              distanceKm: direct.distanceKm,
+              durationMin: direct.durationMin,
             });
           }
-        })
-        .catch((err: unknown) => {
+        } catch (err: unknown) {
           if (err instanceof Error && err.name === "AbortError") return;
-          setLine([
-            [startLng, startLat],
-            [endLng, endLat],
-          ]);
-        });
+        }
+      })();
 
       return () => controller.abort();
     }
+
+    lastFittedPhaseKeyRef.current = null;
+    lastRoutedCoordsRef.current = null;
 
     // 2. Otherwise restore default route style & regular pickup -> dropoff behavior
     if (map.getLayer("route-line")) {
@@ -1117,24 +1215,37 @@ export default function MapLibreMap({
     const controller = new AbortController();
     const url = `/api/route?start=${pickup.lng},${pickup.lat}&end=${dropoff.lng},${dropoff.lat}`;
 
-    fetch(url, { signal: controller.signal })
-      .then((res) => {
-        if (!res.ok) throw new Error("Route fetch failed");
-        return res.json();
-      })
-      .then((data) => {
-        if (Array.isArray(data.coordinates) && data.coordinates.length > 0) {
-          setLine(data.coordinates);
-          onRouteInfoRef.current?.(data.distanceKm, data.durationMin);
+    (async () => {
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (res.ok) {
+          const data = await res.json();
+          if (!data.isFallback && Array.isArray(data.coordinates) && data.coordinates.length > 0) {
+            setLine(data.coordinates);
+            onRouteInfoRef.current?.(data.distanceKm, data.durationMin);
+            return;
+          }
         }
-      })
-      .catch((err: unknown) => {
-        if (err instanceof Error && err.name === "AbortError") return;
+        const direct = await fetchDirectBrowserOsrm(
+          pickup.lng,
+          pickup.lat,
+          dropoff.lng,
+          dropoff.lat,
+          controller.signal
+        );
+        if (direct) {
+          setLine(direct.coordinates);
+          onRouteInfoRef.current?.(direct.distanceKm, direct.durationMin);
+          return;
+        }
         setLine([
           [pickup.lng, pickup.lat],
           [dropoff.lng, dropoff.lat],
         ]);
-      });
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") return;
+      }
+    })();
 
     return () => controller.abort();
   }, [pickup, dropoff, acceptedRideRoute, activePhase, mapLoaded]);
@@ -1154,28 +1265,30 @@ export default function MapLibreMap({
     mapRef.current.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 800 });
   };
 
-  const handleDriverMoveCloser = () => {
-    if (!acceptedRideRoute) return;
-    const curLat = acceptedRideRoute.driverLocation.lat;
-    const curLng = acceptedRideRoute.driverLocation.lng;
-    const targetLat =
-      activePhase === "pickup"
-        ? acceptedRideRoute.pickupLocation.lat
-        : acceptedRideRoute.dropoffLocation.lat;
-    const targetLng =
-      activePhase === "pickup"
-        ? acceptedRideRoute.pickupLocation.lng
-        : acceptedRideRoute.dropoffLocation.lng;
-
-    // Advance ~15% closer to active target point (pickup or dropoff)
-    const stepRatio = 0.15;
-    const nextLat = curLat + (targetLat - curLat) * stepRatio;
-    const nextLng = curLng + (targetLng - curLng) * stepRatio;
-
-    onDriverLocationUpdate?.({
-      lat: Math.round(nextLat * 1e5) / 1e5,
-      lng: Math.round(nextLng * 1e5) / 1e5,
-    });
+  const handleSyncLiveGps = () => {
+    if (geolocateControlRef.current) {
+      try {
+        geolocateControlRef.current.trigger();
+      } catch {
+        // fallback below
+      }
+    }
+    if (typeof window !== "undefined" && "geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = Math.round(pos.coords.latitude * 1e6) / 1e6;
+          const lng = Math.round(pos.coords.longitude * 1e6) / 1e6;
+          onDriverLocationUpdate?.({ lat, lng });
+          onGpsUpdateRef.current?.({
+            lat,
+            lng,
+            accuracy: pos.coords.accuracy ? Math.round(pos.coords.accuracy) : undefined,
+          });
+        },
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
+      );
+    }
   };
 
   const handleRecenter = () => {
@@ -1353,15 +1466,53 @@ export default function MapLibreMap({
 
             {isDriver ? (
               <div className="flex flex-col gap-2">
+                <div className="px-2.5 py-1.5 rounded-xl bg-emerald-50/90 border border-emerald-200/80 flex items-center justify-between text-[11px] text-emerald-900">
+                  <div className="flex items-center gap-1.5 font-semibold min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                    <span className="truncate">
+                      Live GPS Active · Tracking Rider &amp; Passenger
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSyncLiveGps}
+                    className="ml-2 shrink-0 px-2 py-0.5 rounded-md bg-white hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold transition-colors cursor-pointer"
+                  >
+                    Sync GPS
+                  </button>
+                </div>
+
                 {tripStage === "en_route_pickup" && (
                   <>
-                    <button
-                      type="button"
-                      onClick={handleDriverMoveCloser}
-                      className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs shadow flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-                    >
-                      <span>🚗 Move Driver Closer (Toward Passenger)</span>
-                    </button>
+                    {Math.round(
+                      metersBetween(
+                        acceptedRideRoute.driverLocation.lat,
+                        acceptedRideRoute.driverLocation.lng,
+                        acceptedRideRoute.pickupLocation.lat,
+                        acceptedRideRoute.pickupLocation.lng
+                      )
+                    ) <= 80 && (
+                      <div className="px-2.5 py-1.5 rounded-xl bg-amber-50 border border-amber-300 text-[11px] font-bold text-amber-900 flex items-center justify-between animate-pulse">
+                        <span>
+                          🎯 Within{" "}
+                          {Math.max(
+                            5,
+                            Math.round(
+                              metersBetween(
+                                acceptedRideRoute.driverLocation.lat,
+                                acceptedRideRoute.driverLocation.lng,
+                                acceptedRideRoute.pickupLocation.lat,
+                                acceptedRideRoute.pickupLocation.lng
+                              )
+                            )
+                          )}
+                          m of pickup geofence!
+                        </span>
+                        <span className="text-[10px] uppercase font-black text-amber-700">
+                          Ready
+                        </span>
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={() => void onDriverArrived?.()}
@@ -1420,22 +1571,13 @@ export default function MapLibreMap({
                 )}
 
                 {tripStage === "in_progress" && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleDriverMoveCloser}
-                      className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs shadow flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-                    >
-                      <span>🚗 Move Driver Closer (Toward Destination)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onClearAcceptedRoute}
-                      className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-500/20 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-                    >
-                      <span>🎉 Drop Off Passenger (Complete Ride)</span>
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={onClearAcceptedRoute}
+                    className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-500/20 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    <span>🎉 Drop Off Passenger (Complete Ride)</span>
+                  </button>
                 )}
               </div>
             ) : (

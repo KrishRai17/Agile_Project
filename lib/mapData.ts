@@ -331,6 +331,7 @@ export interface AcceptedRideRoute {
   driverName: string;
   driverVehicle?: string;
   driverPlate?: string;
+  passengerId?: string;
   passengerName: string;
   fare?: string;
   phase?: RidePhase;

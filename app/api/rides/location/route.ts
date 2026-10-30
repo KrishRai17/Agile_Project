@@ -3,32 +3,36 @@ import { canViewDriverLocation, getDriverLocation, updateDriverLocation } from "
 import { readJsonObject, requireUser } from "@/lib/apiAuth";
 import { isValidLatLng, parseOptionalNumber } from "@/lib/validate";
 
-// GET /api/rides/location?driverId=xxx
-// Allowed for the driver themself, or a passenger whose request that driver has accepted.
+// GET /api/rides/location?driverId=xxx (or ?userId=xxx)
+// Allowed for the user themself, a passenger whose request that driver has accepted,
+// or the driver who accepted that passenger's request.
 export async function GET(req: NextRequest) {
   const auth = requireUser(req);
   if ("response" in auth) return auth.response;
 
   const { searchParams } = new URL(req.url);
-  const driverId = searchParams.get("driverId");
+  const targetId = searchParams.get("userId") || searchParams.get("driverId");
 
-  if (!driverId) {
-    return NextResponse.json({ error: "Missing driverId parameter." }, { status: 400 });
+  if (!targetId) {
+    return NextResponse.json({ error: "Missing driverId or userId parameter." }, { status: 400 });
   }
 
-  if (!canViewDriverLocation(auth.user.id, driverId)) {
-    return NextResponse.json({ error: "You can only track a driver who accepted your ride." }, { status: 403 });
+  if (!canViewDriverLocation(auth.user.id, targetId)) {
+    return NextResponse.json(
+      { error: "You can only track a rider or passenger in your active accepted ride." },
+      { status: 403 }
+    );
   }
 
-  const location = getDriverLocation(driverId);
+  const location = getDriverLocation(targetId);
   return NextResponse.json({ location: location ?? null });
 }
 
 // POST /api/rides/location
-// Body: { lat, lng, heading?, speed? } — always recorded for the signed-in driver
-// (a driverId in the body is ignored so nobody can spoof another driver's position).
+// Body: { lat, lng, heading?, speed? } — recorded for the signed-in user (driver or passenger)
+// so both rider and passenger can share real-time GPS movement during an active ride.
 export async function POST(req: NextRequest) {
-  const auth = requireUser(req, "driver");
+  const auth = requireUser(req);
   if ("response" in auth) return auth.response;
 
   try {

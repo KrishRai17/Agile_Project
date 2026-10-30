@@ -24,8 +24,8 @@ const globalForLimiters = globalThis as unknown as { __hoponLimiters?: Limiters 
 export const limiters: Limiters = (globalForLimiters.__hoponLimiters ??= {
   loginAccount: createRateLimiter({ limit: 8, windowMs: 15 * 60 * 1000 }),
   loginIp: createRateLimiter({ limit: 100, windowMs: 15 * 60 * 1000 }),
-  geocode: createRateLimiter({ limit: 60, windowMs: 60 * 1000 }),
-  route: createRateLimiter({ limit: 60, windowMs: 60 * 1000 }),
-  nominatim: createRateLimiter({ limit: 50, windowMs: 60 * 1000, maxKeys: 4 }),
-  osrm: createRateLimiter({ limit: 120, windowMs: 60 * 1000, maxKeys: 4 }),
+  geocode: createRateLimiter({ limit: 120, windowMs: 60 * 1000 }),
+  route: createRateLimiter({ limit: 300, windowMs: 60 * 1000 }),
+  nominatim: createRateLimiter({ limit: 60, windowMs: 60 * 1000, maxKeys: 4 }),
+  osrm: createRateLimiter({ limit: 300, windowMs: 60 * 1000, maxKeys: 4 }),
 });

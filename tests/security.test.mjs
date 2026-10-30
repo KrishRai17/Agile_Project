@@ -5,6 +5,7 @@ import { loadTs } from "./support/load-ts.mjs";
 // These load the REAL source files, so they fail if the app code regresses.
 const session = await loadTs("lib/session.ts");
 const accounts = await loadTs("lib/accounts.ts");
+const db = await loadTs("lib/db.ts");
 const rate = await loadTs("lib/rateLimit.ts");
 const ttl = await loadTs("lib/ttlCache.ts");
 const validate = await loadTs("lib/validate.ts");
@@ -100,6 +101,62 @@ test("account lookups return copies and never expose passwords", () => {
   user.name = "Changed";
   assert.equal(accounts.getUserById("usr_driver_demo_01").name, "Aarav Mehta");
   assert.equal(accounts.getUserById("usr_unknown"), null);
+});
+
+test("registerUser creates a new SQLite user and authenticates with hashed password", () => {
+  const created = accounts.registerUser({
+    name: "Ananya Verma",
+    email: "ananya.verma@kju.edu",
+    password: "securePass123",
+    role: "passenger",
+    university: "Kristu Jayanti University",
+    studentRollNumber: "23bcac45",
+  });
+  assert.ok(!("error" in created), "registration succeeds");
+  assert.equal(created.name, "Ananya Verma");
+  assert.equal(created.email, "ananya.verma@kju.edu");
+  assert.equal(created.role, "passenger");
+  assert.equal(created.studentRollNumber, "23BCAC45");
+  assert.equal(created.walletBalance, 250);
+
+  // Duplicate email is rejected
+  const dup = accounts.registerUser({
+    name: "Duplicate",
+    email: "ANANYA.VERMA@kju.edu",
+    password: "anotherPassword",
+    role: "driver",
+  });
+  assert.ok("error" in dup);
+
+  // Can authenticate with the newly registered account
+  const authed = accounts.authenticate("ananya.verma@kju.edu", "securePass123");
+  assert.ok(authed);
+  assert.equal(authed.id, created.id);
+  assert.equal(accounts.authenticate("ananya.verma@kju.edu", "wrongPass"), null);
+
+  // Wallet balance can be paid and topped up
+  const paid = accounts.adjustWalletBalance(created.id, -60);
+  assert.ok(!("error" in paid));
+  assert.equal(paid.walletBalance, 190);
+  assert.ok("error" in accounts.adjustWalletBalance(created.id, -500), "blocks overdraft");
+
+  // 2-way post-ride rating updates target user rating
+  const rated = accounts.submitUserRating({
+    requestId: "req_test_rating_1",
+    raterId: created.id,
+    targetUserId: "usr_driver_demo_01",
+    stars: 5,
+    tags: ["Safe Driver", "On Time"],
+    comment: "Great campus ride!",
+  });
+  assert.ok(!("error" in rated));
+  assert.ok(rated.rating >= 4.8 && rated.rating <= 5.0);
+
+  // Database stats report tables
+  const stats = db.getDatabaseStats();
+  assert.equal(stats.engine, "SQLite 3 (WAL)");
+  assert.ok(stats.users >= 5);
+  assert.ok(stats.ratings >= 1);
 });
 
 // ---------- rate limiting ----------

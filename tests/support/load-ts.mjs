@@ -12,9 +12,9 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..")
 const outDir = join(tmpdir(), `hopon-test-build-${process.pid}`);
 let loadCounter = 0;
 
-export async function loadTs(relativePath) {
+function transpileToOutDir(relativePath) {
   const source = readFileSync(join(projectRoot, relativePath), "utf8");
-  const { outputText } = ts.transpileModule(source, {
+  let { outputText } = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.ESNext,
       target: ts.ScriptTarget.ES2022,
@@ -27,8 +27,21 @@ export async function loadTs(relativePath) {
   }
 
   mkdirSync(outDir, { recursive: true });
+
+  // Transpile any relative sibling imports (e.g. "./db") into outDir as well
+  outputText = outputText.replace(/from\s+["']\.\/([a-zA-Z0-9_-]+)["']/g, (_match, depName) => {
+    const depRelPath = join(dirname(relativePath), `${depName}.ts`);
+    transpileToOutDir(depRelPath);
+    return `from "./${depName}.mjs"`;
+  });
+
   const outFile = join(outDir, `${basename(relativePath, ".ts")}.mjs`);
   writeFileSync(outFile, outputText);
+  return outFile;
+}
+
+export async function loadTs(relativePath) {
+  const outFile = transpileToOutDir(relativePath);
   // The query string busts Node's module cache, so loading the same file twice gives a fresh instance
   // (needed to test things that happen at module load, like restoring persisted data).
   return import(`${pathToFileURL(outFile).href}?load=${++loadCounter}`);

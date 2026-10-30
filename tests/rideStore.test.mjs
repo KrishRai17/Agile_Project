@@ -21,6 +21,11 @@ const {
   getDriverLocation,
   canViewDriverLocation,
   countActiveOffersForDriver,
+  listTripHistoryForUser,
+  sendRideMessage,
+  listRideMessages,
+  getPublicRideTracking,
+  subscribeRideEvents,
   pruneStore,
   PENDING_TTL_MS,
   TERMINAL_TTL_MS,
@@ -323,12 +328,14 @@ test("people can't request or accept their own rides", () => {
 test("a driver's live location is visible only to them and passengers they accepted", () => {
   assert.ok(canViewDriverLocation("drv_open", "drv_open"), "drivers can see themselves");
   assert.ok(canViewDriverLocation("p_open", "drv_open"), "accepted passenger can track the driver");
+  assert.ok(canViewDriverLocation("drv_open", "p_open"), "accepting driver can track the passenger");
   assert.ok(!canViewDriverLocation("p_open", "usr_driver_demo_01"), "but not other drivers");
   assert.ok(!canViewDriverLocation("stranger", "drv_open"), "strangers can't track anyone");
 
   const accepted = listRequestsForPassenger("p_open").find((r) => r.status === "accepted");
   cancelRequest(accepted.id, "p_open");
   assert.ok(!canViewDriverLocation("p_open", "drv_open"), "tracking ends when the ride is cancelled");
+  assert.ok(!canViewDriverLocation("drv_open", "p_open"), "driver tracking of passenger also ends");
 });
 
 test("countActiveOffersForDriver counts only that driver's active offers", () => {
@@ -372,8 +379,35 @@ test("accepted rides generate a fresh 4-digit OTP and progress through arrive ->
   assert.equal(verified.tripStage, "in_progress");
   assert.ok(typeof verified.startedAt === "number");
 
+  // In-ride chat messages and public tracking link work and never leak OTP
+  const events = [];
+  const unsub = subscribeRideEvents((e) => events.push(e));
+  const msg1 = sendRideMessage({
+    requestId: req1.id,
+    senderId: "p_otp_1",
+    senderName: "Passenger p_otp_1",
+    senderRole: "passenger",
+    text: "I'm at Gate 1",
+  });
+  unsub();
+  assert.ok(!isError(msg1));
+  assert.ok(events.some((e) => e.type === "message" && e.requestId === req1.id));
+  const msgs = listRideMessages(req1.id, "drv_otp");
+  assert.ok(Array.isArray(msgs) && msgs.length === 1);
+  assert.equal(msgs[0].text, "I'm at Gate 1");
+  assert.ok(isError(listRideMessages(req1.id, "stranger")));
+
+  const pub = getPublicRideTracking(req1.id);
+  assert.ok(pub);
+  assert.equal(pub.tripStage, "in_progress");
+  assert.ok(!("otp" in pub), "public tracking never exposes OTP");
+
   // Complete first ride and book a new ride -> gets a new 4-digit OTP that differs from the previous one
   cancelRequest(req1.id, "drv_otp");
+  const history = listTripHistoryForUser("p_otp_1");
+  assert.equal(history.length, 1, "completed OTP-verified trip is recorded in trip_history");
+  assert.equal(history[0].status, "Completed");
+
   const req2 = createRequest(requestFor(offer.id, "p_otp_1"));
   assert.ok(!isError(req2));
   const accepted2 = respondToRequest(req2.id, "drv_otp", "accept");

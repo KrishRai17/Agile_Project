@@ -7,6 +7,7 @@ const localIps = Object.values(os.networkInterfaces())
   .map((iface) => iface.address);
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ["better-sqlite3"],
   allowedDevOrigins: Array.from(
     new Set([
       "10.47.139.183",

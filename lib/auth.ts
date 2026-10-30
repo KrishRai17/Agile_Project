@@ -4,6 +4,8 @@ export interface User {
   email: string;
   university: string;
   studentIdVerified: boolean;
+  studentRollNumber?: string;
+  walletBalance?: number;
   avatarUrl?: string;
   rating: number;
   ridesCompleted: number;

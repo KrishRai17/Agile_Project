@@ -16,9 +16,63 @@ export interface RouteResponse {
   durationMin: number;
   coordinates: [number, number][];
   legs?: RouteLeg[];
+  isFallback?: boolean;
 }
 
 const routeCache = createTtlCache<RouteResponse>(500);
+
+const OSRM_ENDPOINTS = [
+  "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+  "https://router.project-osrm.org/route/v1/driving",
+];
+
+async function fetchOsrmRoute(
+  parsedPoints: [number, number][],
+  fallbackLegs: RouteLeg[]
+): Promise<RouteResponse | null> {
+  const osrmCoords = parsedPoints.map((p) => `${p[0]},${p[1]}`).join(";");
+
+  for (const baseUrl of OSRM_ENDPOINTS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4500);
+    try {
+      const url = `${baseUrl}/${osrmCoords}?overview=full&geometries=geojson&steps=false`;
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "HopOn-Campus-Rides/1.0 (student@hopon.demo; KJU Bengaluru)",
+        },
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      const route = data?.routes?.[0];
+      if (route?.geometry?.coordinates && route.distance > 0) {
+        const coords = route.geometry.coordinates as [number, number][];
+        const legs: RouteLeg[] = (route.legs || []).map(
+          (leg: { distance: number; duration: number }) => ({
+            distanceKm: Math.round((leg.distance / 1000) * 10) / 10,
+            durationMin: Math.max(1, Math.round(leg.duration / 60)),
+          })
+        );
+
+        return {
+          distanceKm: Math.round((route.distance / 1000) * 10) / 10,
+          durationMin: Math.max(1, Math.round(route.duration / 60)),
+          coordinates: coords,
+          legs: legs.length > 0 ? legs : fallbackLegs,
+          isFallback: false,
+        };
+      }
+    } catch {
+      clearTimeout(timeout);
+      // Try next OSRM endpoint
+    }
+  }
+
+  return null;
+}
 
 export async function GET(req: NextRequest) {
   const auth = requireUser(req);
@@ -55,13 +109,13 @@ export async function GET(req: NextRequest) {
   const userLimit = limiters.route.check(`route:${auth.user.id}`);
   if (!userLimit.allowed) return tooManyRequests(userLimit.retryAfterSec);
 
-  const cacheKey = parsedPoints.map((p) => `${p[0].toFixed(4)},${p[1].toFixed(4)}`).join("->");
+  const cacheKey = parsedPoints.map((p) => `${p[0].toFixed(5)},${p[1].toFixed(5)}`).join("->");
   const cached = routeCache.get(cacheKey);
   if (cached) {
     return NextResponse.json(cached);
   }
 
-  // Calculate realistic multi-leg fallback route
+  // Calculate multi-leg fallback route only if live OSRM road routing servers are unreachable
   const fallbackCoords: [number, number][] = [];
   const fallbackLegs: RouteLeg[] = [];
   let totalEstimatedDistKm = 0;
@@ -90,51 +144,16 @@ export async function GET(req: NextRequest) {
     durationMin: totalEstimatedDurationMin,
     coordinates: fallbackCoords,
     legs: fallbackLegs,
+    isFallback: true,
   };
 
-  // Cap calls to the public OSRM demo server across all users; fall back to the estimate if exhausted.
   if (limiters.osrm.check("osrm").allowed) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-
-      const osrmCoords = parsedPoints.map((p) => `${p[0]},${p[1]}`).join(";");
-      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${osrmCoords}?overview=full&geometries=geojson`;
-
-      const res = await fetch(osrmUrl, {
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "HopOn-Campus-Rides/1.0 (student@hopon.demo; KJU Bengaluru)",
-        },
-      });
-
-      clearTimeout(timeout);
-
-      if (res.ok) {
-        const data = await res.json();
-        const route = data?.routes?.[0];
-        if (route?.geometry?.coordinates && route.distance > 0) {
-          const legs: RouteLeg[] = (route.legs || []).map((leg: { distance: number; duration: number }) => ({
-            distanceKm: Math.round((leg.distance / 1000) * 10) / 10,
-            durationMin: Math.max(1, Math.round(leg.duration / 60)),
-          }));
-
-          const routeData: RouteResponse = {
-            distanceKm: Math.round((route.distance / 1000) * 10) / 10,
-            durationMin: Math.max(2, Math.round(route.duration / 60)),
-            coordinates: route.geometry.coordinates as [number, number][],
-            legs: legs.length > 0 ? legs : fallbackLegs,
-          };
-          routeCache.set(cacheKey, routeData, 15 * 60 * 1000);
-          return NextResponse.json(routeData);
-        }
-      }
-    } catch (error) {
-      console.warn("OSRM routing unavailable, using fallback geometry:", error);
+    const osrmRoute = await fetchOsrmRoute(parsedPoints, fallbackLegs);
+    if (osrmRoute) {
+      routeCache.set(cacheKey, osrmRoute, 15 * 60 * 1000);
+      return NextResponse.json(osrmRoute);
     }
   }
 
-  // Cache and return high-fidelity fallback if OSRM timed out
-  routeCache.set(cacheKey, fallbackData, 5 * 60 * 1000);
   return NextResponse.json(fallbackData);
 }

@@ -2,7 +2,8 @@
 
 import React, { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Eye, EyeOff, Lock, Mail, Loader2, ArrowRight, ShieldCheck, Sparkles } from "lucide-react";
+import Link from "next/link";
+import { Eye, EyeOff, Lock, Mail, Loader2, ArrowRight, ShieldCheck, Sparkles, Car } from "lucide-react";
 import { DEMO_ACCOUNT, setStoredUser } from "@/lib/auth";
 import { useToast } from "@/components/ToastContext";
 
@@ -77,7 +78,7 @@ export default function LoginForm() {
     setErrorMessage(null);
     setFilledSlot("driver");
     setTimeout(() => setFilledSlot(null), 1500);
-    showToast("Driver Account", "Credentials filled — click Login to continue.", "info");
+    showToast("Rider / Driver Account", "Credentials filled — click Login to continue.", "info");
   };
 
   const handleForgotPassword = (e: React.MouseEvent) => {
@@ -87,11 +88,6 @@ export default function LoginForm() {
 
   const handleGoogleLogin = () => {
     showToast("Google Workspace SSO", "University institutional Google sign-in is coming soon.", "info");
-  };
-
-  const handleSignUpClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    showToast("Student Registration", "New student onboarding with university ID verification is coming soon.", "info");
   };
 
   return (
@@ -119,7 +115,7 @@ export default function LoginForm() {
           <button
             type="button"
             onClick={handleFillDemo}
-            className={`shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg transition-all shadow-sm flex items-center gap-1 ${
+            className={`shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg transition-all shadow-sm flex items-center gap-1 cursor-pointer ${
               filledSlot === "passenger"
                 ? "bg-emerald-600 text-white"
                 : "bg-blue-600 hover:bg-blue-700 text-white"
@@ -132,14 +128,14 @@ export default function LoginForm() {
           <div className="flex items-center gap-2 min-w-0">
             <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
             <div className="truncate">
-              <span className="font-semibold text-emerald-800">Driver:</span>{" "}
+              <span className="font-semibold text-emerald-800">Rider / Driver:</span>{" "}
               <span className="font-mono text-slate-700 font-medium">driver@hopon.demo</span>
             </div>
           </div>
           <button
             type="button"
             onClick={handleFillDriverDemo}
-            className={`shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg transition-all shadow-sm flex items-center gap-1 ${
+            className={`shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg transition-all shadow-sm flex items-center gap-1 cursor-pointer ${
               filledSlot === "driver"
                 ? "bg-blue-600 text-white"
                 : "bg-emerald-600 hover:bg-emerald-700 text-white"
@@ -255,7 +251,7 @@ export default function LoginForm() {
         <button
           type="submit"
           disabled={isLoading}
-          className="w-full mt-2 flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold text-sm sm:text-base shadow-md shadow-blue-500/20 hover:shadow-lg hover:shadow-blue-500/30 active:scale-[0.99] transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+          className="w-full mt-2 flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold text-sm sm:text-base shadow-md shadow-blue-500/20 hover:shadow-lg hover:shadow-blue-500/30 active:scale-[0.99] transition-all disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
         >
           {isLoading ? (
             <>
@@ -271,8 +267,25 @@ export default function LoginForm() {
         </button>
       </form>
 
+      {/* New Register / Sign Up CTA Card */}
+      <div className="mt-5 p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-bold text-slate-900">New to HopOn?</p>
+          <p className="text-[11px] text-slate-500 truncate">
+            Register as a Student Rider or Passenger
+          </p>
+        </div>
+        <Link
+          href="/register"
+          className="shrink-0 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors"
+        >
+          <Car className="w-3.5 h-3.5" />
+          <span>Sign Up / Register</span>
+        </Link>
+      </div>
+
       {/* Divider */}
-      <div className="relative my-6">
+      <div className="relative my-5">
         <div className="absolute inset-0 flex items-center">
           <div className="w-full border-t border-slate-200" />
         </div>
@@ -311,19 +324,18 @@ export default function LoginForm() {
       </button>
 
       {/* Sign Up Link */}
-      <p className="mt-7 text-center text-xs sm:text-sm text-slate-600">
+      <p className="mt-6 text-center text-xs sm:text-sm text-slate-600">
         Don&apos;t have an account?{" "}
-        <button
-          type="button"
-          onClick={handleSignUpClick}
+        <Link
+          href="/register"
           className="font-semibold text-blue-600 hover:text-blue-700 hover:underline transition-colors"
         >
-          Sign up
-        </button>
+          Sign up on the registration page →
+        </Link>
       </p>
 
       {/* Safe Badge */}
-      <div className="mt-8 pt-4 border-t border-slate-100 flex items-center justify-center gap-1.5 text-xs text-slate-500">
+      <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-center gap-1.5 text-xs text-slate-500">
         <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
         <span>Strictly restricted to verified university students</span>
       </div>

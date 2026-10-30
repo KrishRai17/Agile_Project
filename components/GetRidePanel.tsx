@@ -33,12 +33,14 @@ import {
   PAST_ACTIVITIES,
   AcceptedRideRoute,
 } from "@/lib/mapData";
-import type { RideOffer, RideRequest } from "@/lib/rideStore";
+import type { RideOffer, RideRequest, TripHistoryRecord } from "@/lib/rideStore";
 import { useToast } from "@/components/ToastContext";
 import { useGeolocation } from "@/lib/useGeolocation";
 import { useNominatimSearch } from "@/lib/useNominatimSearch";
 import { User } from "@/lib/auth";
 import { KJU_COORDS, MANYATA_COORDS } from "@/lib/campus";
+import RideCompanionBar from "@/components/RideCompanionBar";
+import { playNotificationChime, triggerBrowserNotification } from "@/lib/notifications";
 
 // Campus defaults (KJU / Manyata Tech Park, from @/lib/campus) are used when a typed place can't be resolved
 const KNOWN_PLACES: LocationItem[] = [...BENGALURU_LOCATIONS, ...CAMPUS_PICKUP_POINTS];
@@ -122,10 +124,30 @@ export default function GetRidePanel({
   // Permission banner — show until user responds
   const [locationBannerDismissed, setLocationBannerDismissed] = useState(false);
 
-  // Search input state
+  // Search input state (synced when pickup/dropoff props change from map or GPS)
   const [pickupText, setPickupText] = useState(pickup ? pickup.name : "Kristu Jayanti University");
   const [dropoffText, setDropoffText] = useState(dropoff ? dropoff.name : "");
   const [activeInputFocus, setActiveInputFocus] = useState<"pickup" | "dropoff" | null>(null);
+
+  const [prevPickupKey, setPrevPickupKey] = useState<string | undefined>(
+    pickup ? `${pickup.id}:${pickup.name}` : undefined
+  );
+  const currentPickupKey = pickup ? `${pickup.id}:${pickup.name}` : undefined;
+  if (currentPickupKey !== prevPickupKey) {
+    setPrevPickupKey(currentPickupKey);
+    if (pickup) {
+      setPickupText(pickup.name);
+    }
+  }
+
+  const [prevDropoffKey, setPrevDropoffKey] = useState<string | undefined>(
+    dropoff ? `${dropoff.id}:${dropoff.name}` : undefined
+  );
+  const currentDropoffKey = dropoff ? `${dropoff.id}:${dropoff.name}` : undefined;
+  if (currentDropoffKey !== prevDropoffKey) {
+    setPrevDropoffKey(currentDropoffKey);
+    setDropoffText(dropoff ? dropoff.name : "");
+  }
 
   // Offer Ride state
   const [offerOrigin, setOfferOrigin] = useState("Kristu Jayanti University");
@@ -221,6 +243,28 @@ export default function GetRidePanel({
   const [driverRequests, setDriverRequests] = useState<(RideRequest & { offer?: RideOffer })[]>([]);
   const [inboxLoading, setInboxLoading] = useState(false);
   const driverPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [dbTripHistory, setDbTripHistory] = useState<TripHistoryRecord[]>([]);
+
+  useEffect(() => {
+    if (activeTab !== "my-rides") return;
+    let cancelled = false;
+    async function loadTripHistory() {
+      try {
+        const res = await fetch("/api/rides/history", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.history)) {
+          setDbTripHistory(data.history);
+        }
+      } catch {
+        // Ignore network errors and fall back to static activity list
+      }
+    }
+    void loadTripHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab]);
 
   // Handle "Use my location" button click
   const handleUseMyLocation = async () => {
@@ -342,18 +386,68 @@ export default function GetRidePanel({
     setOfferInputFocus(null);
   };
 
-  const handleSearchSubmit = (e?: React.FormEvent) => {
+  const handleSearchSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
+    const trimmedPickup = pickupText.trim();
     if (!pickup) {
-      const defaultPickup = BENGALURU_LOCATIONS.find((l) => l.name === "Kristu Jayanti University") || BENGALURU_LOCATIONS[1];
-      onSetPickup(defaultPickup);
+      if (trimmedPickup) {
+        const coords = await resolvePlace(trimmedPickup, KJU_COORDS);
+        onSetPickup({
+          id: `resolved_pickup_${Date.now()}`,
+          name: trimmedPickup,
+          address: trimmedPickup,
+          lat: coords.lat,
+          lng: coords.lng,
+          category: "landmark",
+        });
+      } else {
+        const defaultPickup =
+          BENGALURU_LOCATIONS.find((l) => l.name === "Kristu Jayanti University") ||
+          BENGALURU_LOCATIONS[1];
+        onSetPickup(defaultPickup);
+      }
+    } else if (trimmedPickup && trimmedPickup.toLowerCase() !== pickup.name.toLowerCase()) {
+      const coords = await resolvePlace(trimmedPickup, { lat: pickup.lat, lng: pickup.lng });
+      onSetPickup({
+        id: `resolved_pickup_${Date.now()}`,
+        name: trimmedPickup,
+        address: trimmedPickup,
+        lat: coords.lat,
+        lng: coords.lng,
+        category: "landmark",
+      });
     }
 
-    if (!dropoff && !dropoffText) {
-      const defaultDropoff = BENGALURU_LOCATIONS.find((l) => l.name === "Manyata Tech Park") || BENGALURU_LOCATIONS[4];
-      setDropoffText(defaultDropoff.name);
-      onSetDropoff(defaultDropoff);
+    const trimmedDropoff = dropoffText.trim();
+    if (!dropoff) {
+      if (trimmedDropoff) {
+        const coords = await resolvePlace(trimmedDropoff, MANYATA_COORDS);
+        onSetDropoff({
+          id: `resolved_dropoff_${Date.now()}`,
+          name: trimmedDropoff,
+          address: trimmedDropoff,
+          lat: coords.lat,
+          lng: coords.lng,
+          category: "landmark",
+        });
+      } else {
+        const defaultDropoff =
+          BENGALURU_LOCATIONS.find((l) => l.name === "Manyata Tech Park") ||
+          BENGALURU_LOCATIONS[4];
+        setDropoffText(defaultDropoff.name);
+        onSetDropoff(defaultDropoff);
+      }
+    } else if (trimmedDropoff && trimmedDropoff.toLowerCase() !== dropoff.name.toLowerCase()) {
+      const coords = await resolvePlace(trimmedDropoff, { lat: dropoff.lat, lng: dropoff.lng });
+      onSetDropoff({
+        id: `resolved_dropoff_${Date.now()}`,
+        name: trimmedDropoff,
+        address: trimmedDropoff,
+        lat: coords.lat,
+        lng: coords.lng,
+        category: "landmark",
+      });
     }
 
     setIsSearchingRides(true);
@@ -388,6 +482,11 @@ export default function GetRidePanel({
 
           const prev = lastSeenStageRef.current;
           if (prev.status !== "accepted") {
+            playNotificationChime("success");
+            triggerBrowserNotification(
+              "HopOn · Ride Accepted! 🎉",
+              req.otp ? `Your 4-digit ride OTP is ${req.otp}.` : "Your driver is on the way!"
+            );
             showToast(
               "Ride Accepted! 🎉",
               req.otp
@@ -396,12 +495,22 @@ export default function GetRidePanel({
               "success"
             );
           } else if (stage === "arrived_pickup" && prev.tripStage !== "arrived_pickup") {
+            playNotificationChime("alert");
+            triggerBrowserNotification(
+              "HopOn · Driver Has Arrived! 📍",
+              `Your driver is at ${req.pickup}. Share OTP ${req.otp ?? ""}.`
+            );
             showToast(
               "Driver Has Arrived! 📍",
               `Your driver has arrived at ${req.pickup}. Share your 4-digit OTP (${req.otp ?? ""}) to start the ride.`,
               "info"
             );
           } else if (stage === "in_progress" && prev.tripStage !== "in_progress") {
+            playNotificationChime("success");
+            triggerBrowserNotification(
+              "HopOn · OTP Verified! 🏁",
+              `Heading to ${req.dropoff} — dropoff route is live on the map.`
+            );
             showToast(
               "OTP Verified! 🏁",
               `Heading to ${req.dropoff} — dropoff route is now live on the map.`,
@@ -417,6 +526,7 @@ export default function GetRidePanel({
               driverName: offer?.driverName || "Student Driver",
               driverVehicle: offer?.vehicleModel,
               driverPlate: offer?.vehicleNumber,
+              passengerId: user.id,
               passengerName: user.name,
               fare: offer?.farePerSeat,
               phase,
@@ -488,6 +598,19 @@ export default function GetRidePanel({
         noteParts.push(`Stop: ${stopText.trim()}`);
       }
 
+      const finalPickupName = pickup?.name || pickupText.trim() || "Kristu Jayanti University";
+      const finalDropoffName = dropoff?.name || dropoffText.trim() || "Manyata Tech Park";
+
+      const resolvedPickupCoords =
+        pickup && pickup.name.toLowerCase() === finalPickupName.toLowerCase()
+          ? { lat: pickup.lat, lng: pickup.lng }
+          : await resolvePlace(finalPickupName, pickup ? { lat: pickup.lat, lng: pickup.lng } : KJU_COORDS);
+
+      const resolvedDropoffCoords =
+        dropoff && dropoff.name.toLowerCase() === finalDropoffName.toLowerCase()
+          ? { lat: dropoff.lat, lng: dropoff.lng }
+          : await resolvePlace(finalDropoffName, dropoff ? { lat: dropoff.lat, lng: dropoff.lng } : MANYATA_COORDS);
+
       const res = await fetch("/api/rides/requests", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -495,12 +618,12 @@ export default function GetRidePanel({
           passengerId: user.id,
           passengerName: user.name,
           passengerRating: user.rating,
-          pickup: pickup?.name || pickupText || "Kristu Jayanti University",
-          pickupLat: pickup?.lat ?? KJU_COORDS.lat,
-          pickupLng: pickup?.lng ?? KJU_COORDS.lng,
-          dropoff: dropoff?.name || dropoffText || "Manyata Tech Park",
-          dropoffLat: dropoff?.lat ?? MANYATA_COORDS.lat,
-          dropoffLng: dropoff?.lng ?? MANYATA_COORDS.lng,
+          pickup: finalPickupName,
+          pickupLat: resolvedPickupCoords.lat,
+          pickupLng: resolvedPickupCoords.lng,
+          dropoff: finalDropoffName,
+          dropoffLat: resolvedDropoffCoords.lat,
+          dropoffLng: resolvedDropoffCoords.lng,
           note: noteParts.join(" · "),
         }),
       });
@@ -570,6 +693,7 @@ export default function GetRidePanel({
             driverName: offer?.driverName || "Student Driver",
             driverVehicle: offer?.vehicleModel,
             driverPlate: offer?.vehicleNumber,
+            passengerId: user.id,
             passengerName: user.name,
             fare: offer?.farePerSeat,
             phase,
@@ -723,14 +847,15 @@ export default function GetRidePanel({
               driverName: user.name,
               driverVehicle: offer?.vehicleModel,
               driverPlate: offer?.vehicleNumber,
+              passengerId: reqItem.passengerId,
               passengerName: reqItem.passengerName,
               fare: offer?.farePerSeat,
               phase: "pickup",
               tripStage: "en_route_pickup",
               driverLocation: {
-                lat: offer?.fromLat ?? 13.0583,
-                lng: offer?.fromLng ?? 77.6426,
-                name: offer?.from || "Driver Start Point",
+                lat: geoLocation?.lat ?? offer?.fromLat ?? 13.0583,
+                lng: geoLocation?.lng ?? offer?.fromLng ?? 77.6426,
+                name: geoLocation?.shortName || offer?.from || "Driver (Live GPS)",
               },
               pickupLocation: {
                 lat: reqItem.pickupLat,
@@ -875,29 +1000,35 @@ export default function GetRidePanel({
             </button>
           </div>
 
-          {/* Compact Driver Metrics Strip */}
-          <div className="grid grid-cols-3 gap-2">
+          {/* Driver Earnings & Campus Sustainability Analytics Strip */}
+          <div className="grid grid-cols-4 gap-2">
             <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-200/80">
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Open Reqs</div>
-              <div className="text-base font-extrabold text-slate-900 mt-0.5 flex items-center gap-1.5">
+              <div className="text-sm font-extrabold text-slate-900 mt-0.5 flex items-center gap-1">
                 <span>{pendingReqs.length}</span>
                 {pendingReqs.length > 0 && (
-                  <span className="text-[10px] font-bold px-1.5 py-0.2 bg-orange-100 text-orange-700 rounded-full">
+                  <span className="text-[9px] font-bold px-1.5 py-0.2 bg-orange-100 text-orange-700 rounded-full">
                     New
                   </span>
                 )}
               </div>
             </div>
             <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-200/80">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Active Seats</div>
-              <div className="text-base font-extrabold text-blue-600 mt-0.5">
-                {activeOffer ? `${seatsLeft}/${totalSeats} left` : "No offer"}
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Seats</div>
+              <div className="text-sm font-extrabold text-blue-600 mt-0.5 truncate">
+                {activeOffer ? `${seatsLeft}/${totalSeats} left` : "0 left"}
               </div>
             </div>
             <div className="p-2.5 rounded-2xl bg-emerald-50/70 border border-emerald-200/70">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Est. Earned</div>
-              <div className="text-base font-extrabold text-emerald-700 mt-0.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Earned</div>
+              <div className="text-sm font-extrabold text-emerald-700 mt-0.5">
                 ₹{estimatedEarnings}
+              </div>
+            </div>
+            <div className="p-2.5 rounded-2xl bg-teal-50/70 border border-teal-200/70">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-teal-700">CO₂ Saved</div>
+              <div className="text-sm font-extrabold text-teal-800 mt-0.5">
+                {((acceptedReqs.length + (user?.ridesCompleted ?? 0)) * 1.4).toFixed(1)}kg
               </div>
             </div>
           </div>
@@ -1050,6 +1181,19 @@ export default function GetRidePanel({
                 <CheckCircle2 className="w-4 h-4" />
                 <span>Complete Ride at Dropoff</span>
               </button>
+            )}
+
+            {/* In-Ride Chat, UPI QR, Live Trip Share & SOS Bar for Driver */}
+            {user && (
+              <div className="pt-1">
+                <RideCompanionBar
+                  requestId={activeAcceptedRide.requestId}
+                  userRole="driver"
+                  userId={user.id}
+                  counterpartyName={activeAcceptedRide.passengerName || "Passenger"}
+                  fare={activeAcceptedRide.fare}
+                />
+              </div>
             )}
           </div>
         )}
@@ -1604,12 +1748,19 @@ export default function GetRidePanel({
                                 driverName: user?.name || "Driver",
                                 driverVehicle: offer?.vehicleModel,
                                 driverPlate: offer?.vehicleNumber,
+                                passengerId: req.passengerId,
                                 passengerName: req.passengerName,
                                 fare: offer?.farePerSeat,
                                 phase,
                                 tripStage: stage,
                                 driverLocation:
-                                  stage === "arrived_pickup" || stage === "in_progress"
+                                  geoLocation
+                                    ? {
+                                        lat: geoLocation.lat,
+                                        lng: geoLocation.lng,
+                                        name: geoLocation.shortName || "Driver (Live GPS)",
+                                      }
+                                    : stage === "arrived_pickup" || stage === "in_progress"
                                     ? {
                                         lat: req.pickupLat,
                                         lng: req.pickupLng,
@@ -1674,6 +1825,27 @@ export default function GetRidePanel({
 
   // MY RIDES VIEW
   if (activeTab === "my-rides") {
+    const formattedDbTrips = dbTripHistory.map((entry) => {
+      const dt = new Date(entry.createdAt);
+      const date = dt.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+      const time = dt.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+      return {
+        id: entry.id,
+        date,
+        time,
+        from: entry.from,
+        to: entry.to,
+        vehicle: entry.vehicle,
+        amount: entry.amount.startsWith("₹") ? entry.amount : `₹${entry.amount}`,
+        status: entry.status,
+        isLiveDb: true,
+      };
+    });
+    const combinedRides = [
+      ...formattedDbTrips,
+      ...PAST_ACTIVITIES.map((t) => ({ ...t, isLiveDb: false })),
+    ];
+
     return (
       <div className="w-full bg-white rounded-3xl p-6 sm:p-7 shadow-xl shadow-slate-200/50 border border-slate-200/80 flex flex-col gap-4">
         <div>
@@ -1681,18 +1853,25 @@ export default function GetRidePanel({
             My Campus Rides
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Track active rides and view past ride receipts.
+            Track active rides and view past ride receipts from your database history.
           </p>
         </div>
 
         <div className="space-y-3 max-h-[380px] overflow-y-auto">
-          {PAST_ACTIVITIES.map((trip) => (
+          {combinedRides.map((trip) => (
             <div
               key={trip.id}
               className="p-3.5 rounded-2xl border border-slate-200/80 bg-slate-50/60 hover:bg-white hover:border-blue-200 transition-all flex flex-col gap-2"
             >
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-800">{trip.vehicle}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-bold text-slate-800">{trip.vehicle}</span>
+                  {trip.isLiveDb && (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold">
+                      DB
+                    </span>
+                  )}
+                </div>
                 <span className="text-xs font-bold text-blue-600">{trip.amount}</span>
               </div>
               <div className="text-[11px] text-slate-600 space-y-1">
@@ -1853,26 +2032,33 @@ export default function GetRidePanel({
               </div>
             )}
 
+            {user && activeRequestId && (
+              <RideCompanionBar
+                requestId={activeRequestId}
+                userRole="passenger"
+                userId={user.id}
+                counterpartyName={assignedOffer?.driverName || "Student Driver"}
+                fare={assignedOffer?.farePerSeat || String(selectedRide.price)}
+              />
+            )}
+
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => {
-                  onAcceptedRideRoute?.(null);
-                  setBookingConfirmed(false);
-                  setIsSearchingRides(false);
-                  setReqStatus("idle");
-                  void cancelActiveRequest();
+                  if (onCompleteAcceptedRide) {
+                    onCompleteAcceptedRide();
+                  } else {
+                    onAcceptedRideRoute?.(null);
+                    setBookingConfirmed(false);
+                    setIsSearchingRides(false);
+                    setReqStatus("idle");
+                    void cancelActiveRequest();
+                  }
                 }}
                 className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-center text-xs transition-colors cursor-pointer"
               >
-                Done
-              </button>
-              <button
-                type="button"
-                onClick={() => showToast("Driver Contact", "Calling driver at +91 98450 XXXXX...", "info")}
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold text-xs shadow-md shadow-blue-500/25 transition-all cursor-pointer"
-              >
-                Contact Driver
+                Complete / End Ride
               </button>
             </div>
           </div>

@@ -8,6 +8,7 @@ import HopOnNavbar from "@/components/HopOnNavbar";
 import GetRidePanel from "@/components/GetRidePanel";
 import MapWrapper from "@/components/MapWrapper";
 import ActivityModal from "@/components/ActivityModal";
+import RatingModal from "@/components/RatingModal";
 import UpcomingRide from "@/components/UpcomingRide";
 import QuickActionCard from "@/components/QuickActionCard";
 import Footer from "@/components/Footer";
@@ -18,6 +19,7 @@ import {
   DriverCar,
   LocationItem,
   estimateRoute,
+  haversineKm,
   bearingDegrees,
   AcceptedRideRoute,
 } from "@/lib/mapData";
@@ -81,6 +83,13 @@ export default function HomePage() {
 
   // Active accepted ride route state (Driver -> Pickup -> Dropoff)
   const [activeAcceptedRide, setActiveAcceptedRide] = useState<AcceptedRideRoute | null>(null);
+  const [ratingTarget, setRatingTarget] = useState<{
+    requestId: string;
+    targetUserId: string;
+    targetName: string;
+    targetRole: "driver" | "passenger";
+    fare?: string;
+  } | null>(null);
 
   // Selected Pickup and Dropoff locations
   const [pickup, setPickup] = useState<LocationItem | null>(() => {
@@ -134,33 +143,72 @@ export default function HomePage() {
     async (loc: { lat: number; lng: number; accuracy?: number }, force = false) => {
       setUserLocation(loc);
 
-      // If user is a driver, broadcast their live GPS location to all passengers
-      if (user?.role === "driver") {
+      // Broadcast live GPS location for both drivers and passengers so active rides reflect real movement
+      if (user) {
         fetch("/api/rides/location", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            driverId: user.id,
             lat: loc.lat,
             lng: loc.lng,
           }),
         }).catch(() => {});
 
-        // Update driver position on active accepted route if active
-        setActiveAcceptedRide((prev) => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            driverLocation: {
-              lat: loc.lat,
-              lng: loc.lng,
-              name: "Driver (Live GPS)",
-            },
-          };
-        });
+        if (user.role === "driver") {
+          setActiveAcceptedRide((prev) => {
+            if (!prev) return null;
+            // Avoid collapsing driver & pickup onto identical coordinates when testing on one device
+            const distToPickupKm = haversineKm(
+              loc.lat,
+              loc.lng,
+              prev.pickupLocation.lat,
+              prev.pickupLocation.lng
+            );
+            if (distToPickupKm < 0.03 && prev.tripStage === "en_route_pickup") {
+              return prev;
+            }
+            return {
+              ...prev,
+              driverLocation: {
+                lat: loc.lat,
+                lng: loc.lng,
+                name: "Driver (Live GPS)",
+              },
+            };
+          });
+        } else if (user.role === "passenger") {
+          setActiveAcceptedRide((prev) => {
+            if (!prev) return null;
+            if (prev.tripStage === "in_progress") return prev;
+            // Only refine pickup pin with live GPS if the passenger is within 800m of their booked pickup
+            const distFromBookedPickupKm = haversineKm(
+              loc.lat,
+              loc.lng,
+              prev.pickupLocation.lat,
+              prev.pickupLocation.lng
+            );
+            const distFromDriverKm = haversineKm(
+              loc.lat,
+              loc.lng,
+              prev.driverLocation.lat,
+              prev.driverLocation.lng
+            );
+            if (distFromBookedPickupKm > 0.8 || distFromDriverKm < 0.03) {
+              return prev;
+            }
+            return {
+              ...prev,
+              pickupLocation: {
+                lat: loc.lat,
+                lng: loc.lng,
+                name: prev.pickupLocation.name,
+              },
+            };
+          });
+        }
       }
 
-      if (!force && gpsPickupLockedRef.current) return;
+      if (!force) return;
       gpsPickupLockedRef.current = true;
       const versionAtStart = manualPickupVersionRef.current;
       const applyPickup = (item: LocationItem) => {
@@ -202,7 +250,7 @@ export default function HomePage() {
     handleDeviceGpsUpdateRef.current = handleDeviceGpsUpdate;
   }, [handleDeviceGpsUpdate]);
 
-  // Manual/simulated driver step update (e.g. for testing movement across devices)
+  // Direct live GPS update callback from MapLibre GeolocateControl / hardware GPS
   const handleDriverLocationUpdate = useCallback(
     async (loc: { lat: number; lng: number }) => {
       if (!user) return;
@@ -210,7 +258,6 @@ export default function HomePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          driverId: user.id,
           lat: loc.lat,
           lng: loc.lng,
         }),
@@ -218,14 +265,27 @@ export default function HomePage() {
 
       setActiveAcceptedRide((prev) => {
         if (!prev) return null;
-        return {
-          ...prev,
-          driverLocation: {
-            lat: loc.lat,
-            lng: loc.lng,
-            name: "Driver (Live)",
-          },
-        };
+        if (user.role === "driver") {
+          return {
+            ...prev,
+            driverLocation: {
+              lat: loc.lat,
+              lng: loc.lng,
+              name: "Driver (Live GPS)",
+            },
+          };
+        }
+        if (prev.tripStage !== "in_progress") {
+          return {
+            ...prev,
+            pickupLocation: {
+              lat: loc.lat,
+              lng: loc.lng,
+              name: prev.pickupLocation.name,
+            },
+          };
+        }
+        return prev;
       });
     },
     [user]
@@ -233,32 +293,96 @@ export default function HomePage() {
 
   const activeRequestId = activeAcceptedRide?.requestId;
   const activeDriverId = activeAcceptedRide?.driverId;
+  const activePassengerId = activeAcceptedRide?.passengerId;
   const userRole = user?.role;
 
-  // Poll driver live GPS location when an accepted ride is active on passenger screen
+  // Continuously watch real device GPS movement when signed in so both rider and passenger move live
   useEffect(() => {
-    if (!activeRequestId || !activeDriverId || userRole === "driver") return;
+    if (!user?.id || typeof window === "undefined" || !("geolocation" in navigator)) return;
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const lat = Math.round(pos.coords.latitude * 1e6) / 1e6;
+        const lng = Math.round(pos.coords.longitude * 1e6) / 1e6;
+        const accuracy = pos.coords.accuracy ? Math.round(pos.coords.accuracy) : undefined;
+        void handleDeviceGpsUpdateRef.current({ lat, lng, accuracy });
+      },
+      () => {
+        // Fallback to manual/map geolocate control if watchPosition is denied
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 2000,
+        timeout: 10000,
+      }
+    );
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [user?.id]);
 
-    const syncDriverLocation = async () => {
+  // Poll counterparty live GPS location when an accepted ride is active:
+  // - Passenger tracks Driver's real-time GPS location
+  // - Driver tracks Passenger's real-time GPS location (until passenger boards at OTP verification)
+  useEffect(() => {
+    if (!activeRequestId) return;
+    const targetUserId = userRole === "driver" ? activePassengerId : activeDriverId;
+    if (!targetUserId) return;
+
+    const syncCounterpartyLocation = async () => {
       try {
-        const res = await fetch(`/api/rides/location?driverId=${activeDriverId}`);
+        const res = await fetch(`/api/rides/location?userId=${encodeURIComponent(targetUserId)}`);
         if (!res.ok) return;
         const data = await res.json();
         if (typeof data.location?.lat === "number" && typeof data.location?.lng === "number") {
           const { lat, lng } = data.location;
           setActiveAcceptedRide((prev) => {
             if (!prev) return null;
-            const dLat = Math.abs(prev.driverLocation.lat - lat);
-            const dLng = Math.abs(prev.driverLocation.lng - lng);
-            if (dLat < 0.00002 && dLng < 0.00002) return prev;
-            return {
-              ...prev,
-              driverLocation: {
+            if (userRole === "driver") {
+              if (prev.tripStage === "in_progress") return prev;
+              const dLat = Math.abs(prev.pickupLocation.lat - lat);
+              const dLng = Math.abs(prev.pickupLocation.lng - lng);
+              if (dLat < 0.00002 && dLng < 0.00002) return prev;
+              const distFromBookedPickupKm = haversineKm(
                 lat,
                 lng,
-                name: "Driver (Live GPS)",
-              },
-            };
+                prev.pickupLocation.lat,
+                prev.pickupLocation.lng
+              );
+              const distFromDriverKm = haversineKm(
+                lat,
+                lng,
+                prev.driverLocation.lat,
+                prev.driverLocation.lng
+              );
+              if (distFromBookedPickupKm > 0.8 || distFromDriverKm < 0.03) return prev;
+              return {
+                ...prev,
+                pickupLocation: {
+                  lat,
+                  lng,
+                  name: prev.pickupLocation.name,
+                },
+              };
+            } else {
+              const dLat = Math.abs(prev.driverLocation.lat - lat);
+              const dLng = Math.abs(prev.driverLocation.lng - lng);
+              if (dLat < 0.00002 && dLng < 0.00002) return prev;
+              const distToPickupKm = haversineKm(
+                lat,
+                lng,
+                prev.pickupLocation.lat,
+                prev.pickupLocation.lng
+              );
+              if (distToPickupKm < 0.03 && prev.tripStage === "en_route_pickup") return prev;
+              return {
+                ...prev,
+                driverLocation: {
+                  lat,
+                  lng,
+                  name: "Driver (Live GPS)",
+                },
+              };
+            }
           });
         }
       } catch {
@@ -266,10 +390,76 @@ export default function HomePage() {
       }
     };
 
-    syncDriverLocation();
-    const interval = setInterval(syncDriverLocation, 2500);
-    return () => clearInterval(interval);
-  }, [activeRequestId, activeDriverId, userRole]);
+    void syncCounterpartyLocation();
+    const interval = setInterval(syncCounterpartyLocation, 2000);
+
+    // Also subscribe to the real-time Server-Sent Events stream (/api/rides/stream)
+    // for sub-second counterparty location and ride stage push updates
+    let es: EventSource | null = null;
+    if (typeof window !== "undefined" && "EventSource" in window) {
+      es = new EventSource("/api/rides/stream");
+      const onStreamPayload = (ev: MessageEvent) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          const loc = payload?.counterpartyLocation;
+          if (typeof loc?.lat === "number" && typeof loc?.lng === "number") {
+            setActiveAcceptedRide((prev) => {
+              if (!prev) return null;
+              if (userRole === "driver") {
+                if (prev.tripStage === "in_progress") return prev;
+                const distFromBookedPickupKm = haversineKm(
+                  loc.lat,
+                  loc.lng,
+                  prev.pickupLocation.lat,
+                  prev.pickupLocation.lng
+                );
+                const distFromDriverKm = haversineKm(
+                  loc.lat,
+                  loc.lng,
+                  prev.driverLocation.lat,
+                  prev.driverLocation.lng
+                );
+                if (distFromBookedPickupKm > 0.8 || distFromDriverKm < 0.03) return prev;
+                return {
+                  ...prev,
+                  pickupLocation: {
+                    lat: loc.lat,
+                    lng: loc.lng,
+                    name: prev.pickupLocation.name,
+                  },
+                };
+              } else {
+                const distToPickupKm = haversineKm(
+                  loc.lat,
+                  loc.lng,
+                  prev.pickupLocation.lat,
+                  prev.pickupLocation.lng
+                );
+                if (distToPickupKm < 0.03 && prev.tripStage === "en_route_pickup") return prev;
+                return {
+                  ...prev,
+                  driverLocation: {
+                    lat: loc.lat,
+                    lng: loc.lng,
+                    name: "Driver (Live GPS)",
+                  },
+                };
+              }
+            });
+          }
+        } catch {
+          // ignore parse error
+        }
+      };
+      es.addEventListener("snapshot", onStreamPayload);
+      es.addEventListener("update", onStreamPayload);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (es) es.close();
+    };
+  }, [activeRequestId, activeDriverId, activePassengerId, userRole]);
 
   // Automatically acquire device GPS coordinates on page mount (once)
   useEffect(() => {
@@ -363,7 +553,8 @@ export default function HomePage() {
   };
 
   const handleClearAcceptedRoute = useCallback(() => {
-    const reqId = activeAcceptedRide?.requestId;
+    const rideSnapshot = activeAcceptedRide;
+    const reqId = rideSnapshot?.requestId;
     setActiveAcceptedRide(null);
     if (reqId) {
       fetch("/api/rides/requests", {
@@ -371,8 +562,22 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requestId: reqId, action: "cancel" }),
       }).catch(() => {});
+
+      const counterpartyId =
+        user?.role === "driver" ? rideSnapshot?.passengerId : rideSnapshot?.driverId;
+      const counterpartyName =
+        user?.role === "driver" ? rideSnapshot?.passengerName : rideSnapshot?.driverName;
+      if (counterpartyId && counterpartyName) {
+        setRatingTarget({
+          requestId: reqId,
+          targetUserId: counterpartyId,
+          targetName: counterpartyName,
+          targetRole: user?.role === "driver" ? "passenger" : "driver",
+          fare: rideSnapshot?.fare,
+        });
+      }
     }
-  }, [activeAcceptedRide?.requestId]);
+  }, [activeAcceptedRide, user?.role]);
 
   const handleDriverArrived = useCallback(async () => {
     const reqId = activeAcceptedRide?.requestId;
@@ -595,6 +800,19 @@ export default function HomePage() {
 
       {/* Activity History Modal */}
       <ActivityModal isOpen={isActivityOpen} onClose={() => setIsActivityOpen(false)} />
+
+      {/* 2-Way Post-Ride Rating Modal */}
+      {ratingTarget && (
+        <RatingModal
+          isOpen={true}
+          onClose={() => setRatingTarget(null)}
+          requestId={ratingTarget.requestId}
+          targetUserId={ratingTarget.targetUserId}
+          targetName={ratingTarget.targetName}
+          targetRole={ratingTarget.targetRole}
+          fare={ratingTarget.fare}
+        />
+      )}
 
       <Footer />
     </div>

@@ -1,16 +1,62 @@
 "use client";
 
-import React from "react";
-import { X, Receipt, CheckCircle2 } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { X, Receipt, CheckCircle2, Database } from "lucide-react";
 import { PAST_ACTIVITIES } from "@/lib/mapData";
+import type { TripHistoryRecord } from "@/lib/rideStore";
 
 interface ActivityModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
+function formatDbTrip(entry: TripHistoryRecord) {
+  const dt = new Date(entry.createdAt);
+  const date = dt.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+  const time = dt.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+  return {
+    id: entry.id,
+    date,
+    time,
+    from: entry.from,
+    to: entry.to,
+    vehicle: entry.vehicle,
+    amount: entry.amount.startsWith("₹") ? entry.amount : `₹${entry.amount}`,
+    status: entry.status,
+    isLiveDb: true,
+  };
+}
+
 export default function ActivityModal({ isOpen, onClose }: ActivityModalProps) {
+  const [dbTrips, setDbTrips] = useState<TripHistoryRecord[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    async function loadHistory() {
+      try {
+        const res = await fetch("/api/rides/history", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.history)) {
+          setDbTrips(data.history);
+        }
+      } catch {
+        // Ignore network errors and fall back to demo activity list
+      }
+    }
+    void loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
+
+  const combinedTrips = [
+    ...dbTrips.map(formatDbTrip),
+    ...PAST_ACTIVITIES.map((t) => ({ ...t, isLiveDb: false })),
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-200">
@@ -23,7 +69,7 @@ export default function ActivityModal({ isOpen, onClose }: ActivityModalProps) {
             </div>
             <div>
               <h2 className="text-lg font-bold text-neutral-900 leading-tight">Your Activity</h2>
-              <p className="text-xs text-slate-500">Past trips & upcoming scheduled rides</p>
+              <p className="text-xs text-slate-500">Past trips & database ride history</p>
             </div>
           </div>
           <button
@@ -36,7 +82,7 @@ export default function ActivityModal({ isOpen, onClose }: ActivityModalProps) {
 
         {/* Trips List */}
         <div className="p-6 max-h-[460px] overflow-y-auto space-y-4">
-          {PAST_ACTIVITIES.map((trip) => (
+          {combinedTrips.map((trip) => (
             <div
               key={trip.id}
               className="p-4 rounded-2xl border border-slate-200/80 hover:border-slate-300 hover:bg-slate-50/60 transition-all flex flex-col gap-2.5"
@@ -46,6 +92,11 @@ export default function ActivityModal({ isOpen, onClose }: ActivityModalProps) {
                   <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 font-bold">
                     {trip.vehicle}
                   </span>
+                  {trip.isLiveDb && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                      <Database className="w-2.5 h-2.5" /> Live DB
+                    </span>
+                  )}
                   <span>{trip.date} · {trip.time}</span>
                 </div>
                 <div className="text-sm font-bold text-slate-900">{trip.amount}</div>

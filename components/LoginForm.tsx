@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Lock, Mail, Loader2, ArrowRight, ShieldCheck, Sparkles } from "lucide-react";
-import { DEMO_CREDENTIALS, DEFAULT_USER, setStoredUser } from "@/lib/auth";
+import { DEMO_ACCOUNT, setStoredUser } from "@/lib/auth";
 import { useToast } from "@/components/ToastContext";
 
 export default function LoginForm() {
@@ -16,41 +16,68 @@ export default function LoginForm() {
   const [rememberMe, setRememberMe] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [filledSlot, setFilledSlot] = useState<"passenger" | "driver" | null>(null);
+
+  // Keep refs in sync so handleSubmit always reads the latest value
+  // even if called immediately after a Fill button click
+  const emailRef = useRef(email);
+  const passwordRef = useRef(password);
+  const setEmailSynced = (v: string) => { emailRef.current = v; setEmail(v); };
+  const setPasswordSynced = (v: string) => { passwordRef.current = v; setPassword(v); };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    const trimmedEmail = email.trim();
+    const trimmedEmail = emailRef.current.trim();
+    const currentPassword = passwordRef.current;
 
-    if (!trimmedEmail || !password) {
+    if (!trimmedEmail || !currentPassword) {
       setErrorMessage("Please enter both email and password.");
       return;
     }
 
     setIsLoading(true);
 
-    // Realistic authentication flow simulation
-    setTimeout(() => {
-      if (
-        trimmedEmail.toLowerCase() === DEMO_CREDENTIALS.email.toLowerCase() &&
-        password === DEMO_CREDENTIALS.password
-      ) {
-        setStoredUser(DEFAULT_USER);
-        showToast("Welcome back!", "Signed in successfully as Krish Rai.", "success");
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmedEmail, password: currentPassword, rememberMe }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.user) {
+        setStoredUser(data.user, rememberMe);
+        showToast("Welcome back!", `Signed in successfully as ${data.user.name}.`, "success");
         router.push("/home");
       } else {
-        setIsLoading(false);
-        setErrorMessage("Invalid email or password.");
+        setErrorMessage(data.error || "Invalid email or password.");
       }
-    }, 700);
+    } catch {
+      setErrorMessage("Network error. Please check your connection and try again.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleFillDemo = () => {
-    setEmail(DEMO_CREDENTIALS.email);
-    setPassword(DEMO_CREDENTIALS.password);
+    setEmailSynced(DEMO_ACCOUNT.email);
+    setPasswordSynced(DEMO_ACCOUNT.passwordHint);
     setErrorMessage(null);
-    showToast("Demo Credentials Applied", "Credentials filled for student@hopon.demo", "info");
+    setFilledSlot("passenger");
+    setTimeout(() => setFilledSlot(null), 1500);
+    showToast("Demo Credentials Applied", "Credentials filled — click Login to continue.", "info");
+  };
+
+  const handleFillDriverDemo = () => {
+    setEmailSynced("driver@hopon.demo");
+    setPasswordSynced("hopon123");
+    setErrorMessage(null);
+    setFilledSlot("driver");
+    setTimeout(() => setFilledSlot(null), 1500);
+    showToast("Driver Account", "Credentials filled — click Login to continue.", "info");
   };
 
   const handleForgotPassword = (e: React.MouseEvent) => {
@@ -79,22 +106,48 @@ export default function LoginForm() {
         </p>
       </div>
 
-      {/* Demo Credentials Helper Pill */}
-      <div className="mb-6 p-3.5 rounded-xl bg-blue-50/80 border border-blue-200/80 text-blue-900 flex items-center justify-between gap-3 text-xs sm:text-sm">
-        <div className="flex items-center gap-2 min-w-0">
-          <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
-          <div className="truncate">
-            <span className="font-semibold text-blue-800">Demo Account:</span>{" "}
-            <span className="font-mono text-slate-700 font-medium">student@hopon.demo</span>
+      {/* Demo Credentials Helper Pills */}
+      <div className="mb-5 space-y-2">
+        <div className="p-3 rounded-xl bg-blue-50/80 border border-blue-200/80 text-blue-900 flex items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+            <div className="truncate">
+              <span className="font-semibold text-blue-800">Passenger:</span>{" "}
+              <span className="font-mono text-slate-700 font-medium">student@hopon.demo</span>
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={handleFillDemo}
+            className={`shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg transition-all shadow-sm flex items-center gap-1 ${
+              filledSlot === "passenger"
+                ? "bg-emerald-600 text-white"
+                : "bg-blue-600 hover:bg-blue-700 text-white"
+            }`}
+          >
+            {filledSlot === "passenger" ? "✓ Filled" : "Fill"}
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={handleFillDemo}
-          className="shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors shadow-sm"
-        >
-          Fill Demo
-        </button>
+        <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-200/80 text-emerald-900 flex items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <div className="truncate">
+              <span className="font-semibold text-emerald-800">Driver:</span>{" "}
+              <span className="font-mono text-slate-700 font-medium">driver@hopon.demo</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleFillDriverDemo}
+            className={`shrink-0 px-2.5 py-1 text-xs font-semibold rounded-lg transition-all shadow-sm flex items-center gap-1 ${
+              filledSlot === "driver"
+                ? "bg-blue-600 text-white"
+                : "bg-emerald-600 hover:bg-emerald-700 text-white"
+            }`}
+          >
+            {filledSlot === "driver" ? "✓ Filled" : "Fill"}
+          </button>
+        </div>
       </div>
 
       {/* Error Message */}
@@ -129,7 +182,7 @@ export default function LoginForm() {
               required
               value={email}
               onChange={(e) => {
-                setEmail(e.target.value);
+                setEmailSynced(e.target.value);
                 if (errorMessage) setErrorMessage(null);
               }}
               placeholder="student@university.edu"
@@ -157,7 +210,7 @@ export default function LoginForm() {
               required
               value={password}
               onChange={(e) => {
-                setPassword(e.target.value);
+                setPasswordSynced(e.target.value);
                 if (errorMessage) setErrorMessage(null);
               }}
               placeholder="Enter your password"

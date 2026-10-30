@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import React from "react";
-import { DriverCar, LocationItem } from "@/lib/mapData";
+import { DriverCar, LocationItem, AcceptedRideRoute } from "@/lib/mapData";
 
 // Dynamically import MapLibreMap with ssr: false for browser vector rendering
 const MapLibreMap = dynamic(() => import("@/components/MapLibreMap"), {
@@ -23,9 +23,19 @@ interface MapWrapperProps {
   pickup: LocationItem | null;
   dropoff: LocationItem | null;
   driverCars: DriverCar[];
+  userLocation?: { lat: number; lng: number; accuracy?: number } | null;
   onSelectMapLocation?: (type: "pickup" | "dropoff", location: LocationItem) => void;
   targetMode?: "pickup" | "dropoff" | null;
   onLocateCurrentLocation?: () => void;
+  onRouteInfo?: (distanceKm: number, durationMin: number) => void;
+  onGpsUpdate?: (loc: { lat: number; lng: number; accuracy?: number }) => void;
+  acceptedRideRoute?: AcceptedRideRoute | null;
+  onClearAcceptedRoute?: () => void;
+  isDriver?: boolean;
+  onDriverLocationUpdate?: (loc: { lat: number; lng: number }) => void;
+  onRidePhaseChange?: (phase: "pickup" | "dropoff") => void;
+  onDriverArrived?: () => Promise<void> | void;
+  onVerifyRideOtp?: (otp: string) => Promise<boolean>;
 }
 
 export default function MapWrapper(props: MapWrapperProps) {

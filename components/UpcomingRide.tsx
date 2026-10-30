@@ -4,11 +4,8 @@ import React from "react";
 import {
   Car,
   Clock,
-  MapPin,
   ShieldCheck,
-  CheckCircle2,
   ChevronRight,
-  Navigation,
   MessageSquare,
   Users,
 } from "lucide-react";

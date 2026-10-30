@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Car, ShieldCheck, Heart } from "lucide-react";
+import { Car, ShieldCheck } from "lucide-react";
 import { useToast } from "@/components/ToastContext";
 
 export default function Footer() {

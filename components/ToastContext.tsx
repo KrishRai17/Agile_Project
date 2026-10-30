@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode } from "react";
 import { CheckCircle2, AlertCircle, Info, X } from "lucide-react";
 
-export type ToastType = "info" | "success" | "warning";
+export type ToastType = "info" | "success" | "warning" | "error";
 
 export interface ToastItem {
   id: string;
@@ -48,6 +48,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map((toast) => {
           const isSuccess = toast.type === "success";
           const isWarning = toast.type === "warning";
+          const isError = toast.type === "error";
 
           return (
             <div
@@ -55,6 +56,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               className={`pointer-events-auto transform transition-all duration-300 ease-out flex items-start gap-3 p-4 rounded-xl shadow-xl border backdrop-blur-md animate-in slide-in-from-bottom-3 ${
                 isSuccess
                   ? "bg-emerald-950/90 border-emerald-700/60 text-emerald-50"
+                  : isError
+                  ? "bg-rose-950/90 border-rose-700/60 text-rose-50"
                   : isWarning
                   ? "bg-amber-950/90 border-amber-700/60 text-amber-50"
                   : "bg-slate-900/95 border-slate-700/80 text-white"
@@ -63,6 +66,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <div className="shrink-0 mt-0.5">
                 {isSuccess ? (
                   <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                ) : isError ? (
+                  <AlertCircle className="w-5 h-5 text-rose-400" />
                 ) : isWarning ? (
                   <AlertCircle className="w-5 h-5 text-amber-400" />
                 ) : (

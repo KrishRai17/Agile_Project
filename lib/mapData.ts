@@ -22,7 +22,7 @@ export const BENGALURU_LOCATIONS: LocationItem[] = [
     name: "Kristu Jayanti University",
     address: "K. Narayanapura, Kothanur, Bengaluru, Karnataka 560077",
     lat: 13.0583,
-    lng: 77.6534,
+    lng: 77.6426,
     category: "campus",
   },
   {
@@ -99,32 +99,134 @@ export const BENGALURU_LOCATIONS: LocationItem[] = [
   },
 ];
 
+// High-precision designated campus pickup locations for Kristu Jayanti University
+export const CAMPUS_PICKUP_POINTS: LocationItem[] = [
+  {
+    id: "kju_gate1",
+    name: "Main Gate 1",
+    address: "K. Narayanapura Main Road, KJU Front Entrance",
+    lat: 13.0583,
+    lng: 77.6426,
+    category: "campus",
+  },
+  {
+    id: "kju_gate2",
+    name: "Gate 2 (Sports Arena)",
+    address: "Near Kristu Jayanti Sports Complex & Grounds",
+    lat: 13.0628,
+    lng: 77.6433,
+    category: "campus",
+  },
+  {
+    id: "kju_quad",
+    name: "Admin Quadrangle",
+    address: "Main College Administrative Quadrangle",
+    lat: 13.0579,
+    lng: 77.6424,
+    category: "campus",
+  },
+  {
+    id: "kju_pg_block",
+    name: "PG & MBA Block",
+    address: "Post Graduate Centre & Management Block, KJU",
+    lat: 13.059,
+    lng: 77.6428,
+    category: "campus",
+  },
+  {
+    id: "kju_bus_bay",
+    name: "Campus Bus Bay",
+    address: "College Bus Stop & Auto Stand, K. Narayanapura",
+    lat: 13.0572,
+    lng: 77.6418,
+    category: "transit",
+  },
+];
+
 // Initial vehicles on the map — only bike, scooty, and car types
 export interface DriverCar {
   id: string;
   lat: number;
   lng: number;
+  /** Heading in degrees clockwise from north (0 = up/north, 90 = east). Matches the CSS rotate() of the icon. */
   rotation: number;
+  /** Anchor the vehicle patrols around so it never drifts off the map. */
+  homeLat: number;
+  homeLng: number;
   type: "bike" | "scooty" | "car";
   model: string;
   plate: string;
 }
 
-export const INITIAL_DRIVER_CARS: DriverCar[] = [
-  // Cars
-  { id: "v-1",  lat: 12.9815, lng: 77.5895, rotation: 18,  type: "car",    model: "Maruti Swift Dzire",  plate: "KA 01 MJ 4210" },
-  { id: "v-2",  lat: 12.9772, lng: 77.5935, rotation: 110, type: "car",    model: "Tata Tigor",          plate: "KA 03 HM 2901" },
-  { id: "v-3",  lat: 12.9832, lng: 77.5925, rotation: 290, type: "car",    model: "Honda Amaze",         plate: "KA 01 TR 7721" },
-  { id: "v-4",  lat: 12.9718, lng: 77.5955, rotation: 195, type: "car",    model: "WagonR",              plate: "KA 05 KT 6620" },
+type RawDriverCar = Omit<DriverCar, "homeLat" | "homeLng">;
+
+const RAW_DRIVER_CARS: RawDriverCar[] = [
+  // Cars around KJU and Manyata corridor
+  { id: "v-1",  lat: 13.0592, lng: 77.6435, rotation: 18,  type: "car",    model: "Maruti Swift Dzire",  plate: "KA 01 MJ 4210" },
+  { id: "v-2",  lat: 13.0565, lng: 77.6410, rotation: 110, type: "car",    model: "Tata Tigor",          plate: "KA 03 HM 2901" },
+  { id: "v-3",  lat: 13.0610, lng: 77.6450, rotation: 290, type: "car",    model: "Honda Amaze",         plate: "KA 01 TR 7721" },
+  { id: "v-4",  lat: 13.0520, lng: 77.6380, rotation: 195, type: "car",    model: "WagonR",              plate: "KA 05 KT 6620" },
   // Scooties
-  { id: "v-5",  lat: 12.9798, lng: 77.5945, rotation: 75,  type: "scooty", model: "Honda Activa 6G",     plate: "KA 05 EM 1092" },
-  { id: "v-6",  lat: 12.9750, lng: 77.5912, rotation: 340, type: "scooty", model: "TVS Jupiter",         plate: "KA 02 AB 9123" },
-  { id: "v-7",  lat: 12.9805, lng: 77.5855, rotation: 130, type: "scooty", model: "Suzuki Access 125",   plate: "KA 02 YZ 5110" },
+  { id: "v-5",  lat: 13.0585, lng: 77.6455, rotation: 75,  type: "scooty", model: "Honda Activa 6G",     plate: "KA 05 EM 1092" },
+  { id: "v-6",  lat: 13.0570, lng: 77.6395, rotation: 340, type: "scooty", model: "TVS Jupiter",         plate: "KA 02 AB 9123" },
+  { id: "v-7",  lat: 13.0605, lng: 77.6415, rotation: 130, type: "scooty", model: "Suzuki Access 125",   plate: "KA 02 YZ 5110" },
   // Bikes
-  { id: "v-8",  lat: 12.9735, lng: 77.5878, rotation: 145, type: "bike",   model: "Hero Splendor Plus",  plate: "KA 03 EQ 4589" },
-  { id: "v-9",  lat: 12.9782, lng: 77.5885, rotation: 215, type: "bike",   model: "Bajaj Pulsar 150",    plate: "KA 04 MP 8812" },
-  { id: "v-10", lat: 12.9768, lng: 77.5862, rotation: 80,  type: "bike",   model: "Royal Enfield Bullet", plate: "KA 04 NX 3014" },
+  { id: "v-8",  lat: 13.0558, lng: 77.6445, rotation: 145, type: "bike",   model: "Hero Splendor Plus",  plate: "KA 03 EQ 4589" },
+  { id: "v-9",  lat: 13.0598, lng: 77.6385, rotation: 215, type: "bike",   model: "Bajaj Pulsar 150",    plate: "KA 04 MP 8812" },
+  { id: "v-10", lat: 13.0545, lng: 77.6420, rotation: 80,  type: "bike",   model: "Royal Enfield Bullet", plate: "KA 04 NX 3014" },
+  // Near KJU gates and Manyata
+  { id: "v-11", lat: 13.0588, lng: 77.6460, rotation: 45,  type: "car",    model: "Hyundai Aura",        plate: "KA 03 NB 1182" },
+  { id: "v-12", lat: 13.0575, lng: 77.6475, rotation: 200, type: "scooty", model: "Honda Dio",           plate: "KA 02 CD 7741" },
+  { id: "v-13", lat: 13.0602, lng: 77.6468, rotation: 310, type: "bike",   model: "TVS Apache 160",      plate: "KA 05 FG 2290" },
 ];
+
+export const INITIAL_DRIVER_CARS: DriverCar[] = RAW_DRIVER_CARS.map((c) => ({
+  ...c,
+  homeLat: c.lat,
+  homeLng: c.lng,
+}));
+
+/** Max distance (in degrees, ~650m) a vehicle may roam from its campus anchor. */
+export const DRIVER_ROAM_RADIUS_DEG = 0.006;
+
+/** Great-circle distance between two coordinates, in km. */
+export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+/**
+ * Compass heading in degrees clockwise from north (0 = N, 90 = E, 180 = S, 270 = W)
+ * pointing from one coordinate towards another. Flat-earth approximation, fine for campus distances.
+ */
+export function bearingDegrees(
+  fromLat: number,
+  fromLng: number,
+  toLat: number,
+  toLng: number
+): number {
+  const dLat = toLat - fromLat;
+  const dLng = toLng - fromLng;
+  return ((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360;
+}
+
+/**
+ * Rough road distance/duration estimate used until a real route arrives:
+ * straight-line distance with a 1.3x road factor and ~22 km/h city speed.
+ */
+export function estimateRoute(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number }
+): { distanceKm: number; durationMin: number } {
+  const distanceKm = Math.max(0.5, haversineKm(from.lat, from.lng, to.lat, to.lng) * 1.3);
+  return { distanceKm, durationMin: Math.max(3, Math.round((distanceKm / 22) * 60)) };
+}
 
 export interface RideOption {
   id: string;
@@ -195,7 +297,7 @@ export const PAST_ACTIVITIES: ActivityTrip[] = [
     from: "Manyata Tech Park Gate 4",
     to: "Kristu Jayanti University",
     amount: "₹118",
-    vehicle: "UberGo",
+    vehicle: "HopOn Car",
     status: "Completed",
   },
   {
@@ -205,7 +307,7 @@ export const PAST_ACTIVITIES: ActivityTrip[] = [
     from: "Hennur Bus Depot",
     to: "Vidhana Soudha Metro",
     amount: "₹185",
-    vehicle: "Premier",
+    vehicle: "HopOn Car",
     status: "Completed",
   },
   {
@@ -215,7 +317,40 @@ export const PAST_ACTIVITIES: ActivityTrip[] = [
     from: "KJU Campus Gate 2",
     to: "Elements Mall, Nagavara",
     amount: "₹65",
-    vehicle: "Uber Auto",
+    vehicle: "HopOn Scooty",
     status: "Completed",
   },
 ];
+
+export type RidePhase = "pickup" | "dropoff";
+export type RideTripStage = "en_route_pickup" | "arrived_pickup" | "in_progress";
+
+export interface AcceptedRideRoute {
+  requestId: string;
+  driverId?: string;
+  driverName: string;
+  driverVehicle?: string;
+  driverPlate?: string;
+  passengerName: string;
+  fare?: string;
+  phase?: RidePhase;
+  tripStage?: RideTripStage;
+  /** 4-digit OTP shown to the passenger so they can share it with the driver at pickup. */
+  otp?: string;
+  driverLocation: {
+    lat: number;
+    lng: number;
+    name: string;
+  };
+  pickupLocation: {
+    lat: number;
+    lng: number;
+    name: string;
+  };
+  dropoffLocation: {
+    lat: number;
+    lng: number;
+    name: string;
+  };
+}
+

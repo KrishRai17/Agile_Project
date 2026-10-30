@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { X, Clock, MapPin, Receipt, ArrowRight, CheckCircle2 } from "lucide-react";
+import { X, Receipt, CheckCircle2 } from "lucide-react";
 import { PAST_ACTIVITIES } from "@/lib/mapData";
 
 interface ActivityModalProps {

@@ -4,24 +4,26 @@ import React, { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Car,
-  ShieldCheck,
-  BadgePercent,
-  Users,
-  MapPin,
   CheckCircle2,
   Navigation,
   Sparkles,
 } from "lucide-react";
 import LoginForm from "@/components/LoginForm";
-import { isAuthenticated } from "@/lib/auth";
+import { syncSession } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
 
   useEffect(() => {
-    if (isAuthenticated()) {
-      router.replace("/home");
-    }
+    let cancelled = false;
+    syncSession().then((user) => {
+      if (!cancelled && user) {
+        router.replace("/home");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   return (

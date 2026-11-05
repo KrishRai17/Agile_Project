@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { registerUser } from "@/lib/accounts";
+import {
+  createEmailVerificationToken,
+  getUserSessionVersion,
+  registerUser,
+} from "@/lib/accounts";
+import { sendVerificationEmail } from "@/lib/mailer";
 import { clientIp, readJsonObject, tooManyRequests } from "@/lib/apiAuth";
-import { KJU_COORDS, MANYATA_COORDS } from "@/lib/campus";
 import { limiters } from "@/lib/limiters";
-import { createOffer } from "@/lib/rideStore";
 import {
   REMEMBER_ME_SECONDS,
   SESSION_COOKIE,
   SESSION_TTL_SECONDS,
   createSessionToken,
 } from "@/lib/session";
+import { cleanText, cleanVehicleNumber, parseVehicleType } from "@/lib/validate";
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,31 +22,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid request." }, { status: 400 });
     }
 
-    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const name = cleanText(body.name, 80) ?? "";
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
-    const role = body.role === "driver" || body.role === "rider" ? "driver" : "passenger";
-    const university = typeof body.university === "string" ? body.university.trim() : undefined;
+    let role: "passenger" | "driver" | "both" = "passenger";
+    if (body.role === "both" || body.role === "rider") {
+      role = "both";
+    } else if (body.role === "driver") {
+      role = "driver";
+    } else if (body.role === "passenger") {
+      role = "passenger";
+    }
+    const university = cleanText(body.university, 100) ?? undefined;
     const studentRollNumber =
       typeof body.studentRollNumber === "string" ? body.studentRollNumber.trim() : undefined;
 
-    const rawVehicleType = typeof body.vehicleType === "string" ? body.vehicleType.trim() : "";
-    const vehicleType: "Bike" | "Scooty" | "Car" =
-      rawVehicleType === "Bike" || rawVehicleType === "Scooty" || rawVehicleType === "Car"
-        ? rawVehicleType
-        : "Bike";
-    const vehicleModel =
-      typeof body.vehicleModel === "string" && body.vehicleModel.trim()
-        ? body.vehicleModel.trim().slice(0, 60)
-        : vehicleType === "Bike"
-          ? "Bajaj Pulsar 150"
-          : vehicleType === "Scooty"
-            ? "Honda Activa 6G"
-            : "Maruti Swift Dzire";
-    const vehicleNumber =
-      typeof body.vehicleNumber === "string" && body.vehicleNumber.trim()
-        ? body.vehicleNumber.trim().toUpperCase().slice(0, 20)
-        : "KA 04 EK 7142";
+    const vehicleType = parseVehicleType(body.vehicleType);
+    const vehicleModel = cleanText(body.vehicleModel, 60);
+    const vehicleNumber = cleanVehicleNumber(body.vehicleNumber);
 
     if (!name || !email || !password) {
       return NextResponse.json(
@@ -51,10 +48,35 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (role === "driver" || role === "both") {
+      if (!vehicleType) {
+        return NextResponse.json(
+          { error: "Vehicle type must be Bike, Scooty, or Car." },
+          { status: 400 }
+        );
+      }
+      if (!vehicleModel || !vehicleNumber) {
+        return NextResponse.json(
+          {
+            error:
+              "Drivers and riders must supply a valid vehicle model and registration plate number (e.g., KA 04 EK 7142).",
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     const ip = clientIp(req.headers);
-    const ipCheck = limiters.loginIp.check(ip);
-    if (!ipCheck.allowed) {
-      return tooManyRequests(ipCheck.retryAfterSec);
+    if (ip === "unknown") {
+      const globalCheck = limiters.registerGlobal.check("global:register");
+      if (!globalCheck.allowed) {
+        return tooManyRequests(globalCheck.retryAfterSec);
+      }
+    }
+    const registerKey = ip !== "unknown" ? ip : `email:${email}`;
+    const regCheck = limiters.register.check(registerKey);
+    if (!regCheck.allowed) {
+      return tooManyRequests(regCheck.retryAfterSec);
     }
 
     const result = registerUser({
@@ -64,12 +86,12 @@ export async function POST(req: NextRequest) {
       role,
       university,
       studentRollNumber,
-      ...(role === "driver"
+      ...(role === "driver" || role === "both"
         ? {
-          vehicleType,
-          vehicleModel,
-          vehicleNumber,
-        }
+            vehicleType: vehicleType!,
+            vehicleModel: vehicleModel!,
+            vehicleNumber: vehicleNumber!,
+          }
         : {}),
     });
 
@@ -77,41 +99,47 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
-    // If the student registered as a Rider (driver), automatically publish their initial campus ride offer
-    // so they can immediately accept open student ride requests on /home.
-    if (role === "driver") {
-      createOffer({
-        driverId: result.id,
-        driverName: result.name,
-        driverUniversity: result.university,
-        driverRating: result.rating,
-        vehicleModel,
-        vehicleNumber,
-        vehicleType,
-        from: "Kristu Jayanti University",
-        fromLat: KJU_COORDS.lat,
-        fromLng: KJU_COORDS.lng,
-        to: "Manyata Tech Park",
-        toLat: MANYATA_COORDS.lat,
-        toLng: MANYATA_COORDS.lng,
-        departureTime: "Immediate",
-        departureDate: "Today",
-        seats: vehicleType === "Car" ? 3 : 1,
-        farePerSeat: vehicleType === "Car" ? "65" : vehicleType === "Bike" ? "35" : "30",
-      });
+    let emailSent = false;
+    let message = "Verification link sent to your university email.";
+    const verifyIssued = createEmailVerificationToken(result.id);
+    if (!("error" in verifyIssued)) {
+      const sendRes = await sendVerificationEmail(email, verifyIssued.token, name);
+      if (sendRes.success) {
+        emailSent = true;
+      } else {
+        emailSent = false;
+        message =
+          "Account registered, but we could not send the verification email. Please try resending from your account.";
+      }
     }
 
+    const sessionVer = getUserSessionVersion(result.id);
     const rememberMe = body.rememberMe !== false;
     const token = createSessionToken(
       result.id,
-      rememberMe ? REMEMBER_ME_SECONDS : SESSION_TTL_SECONDS
+      rememberMe ? REMEMBER_ME_SECONDS : SESSION_TTL_SECONDS,
+      undefined,
+      Date.now(),
+      sessionVer
     );
 
     const isHttps =
       req.nextUrl.protocol === "https:" ||
       req.headers.get("x-forwarded-proto")?.split(",")[0].trim() === "https";
 
-    const response = NextResponse.json({ success: true, user: result }, { status: 201 });
+    const response = NextResponse.json(
+      {
+        success: true,
+        user: result,
+        verificationRequired: true,
+        emailSent,
+        message,
+        ...(process.env.NODE_ENV !== "production" && !("error" in verifyIssued)
+          ? { verificationToken: verifyIssued.token }
+          : {}),
+      },
+      { status: 201 }
+    );
     response.cookies.set(SESSION_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production" && isHttps,

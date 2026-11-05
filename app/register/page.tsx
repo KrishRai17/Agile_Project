@@ -25,8 +25,8 @@ export default function RegisterPage() {
   const router = useRouter();
   const { showToast } = useToast();
 
-  // Role: "driver" = Student Rider (offers rides with Bike/Scooty/Car), "passenger" = Student Passenger (books rides)
-  const [role, setRole] = useState<"driver" | "passenger">("driver");
+  // Role: "both" = Both Rider & Passenger (offers rides with Bike/Scooty/Car AND books rides), "passenger" = Passenger Only (books rides)
+  const [role, setRole] = useState<"both" | "passenger">("both");
   const [name, setName] = useState("");
   const [studentRollNumber, setStudentRollNumber] = useState("");
   const [university, setUniversity] = useState("Kristu Jayanti University");
@@ -35,10 +35,10 @@ export default function RegisterPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  // Rider Vehicle Details (shown when role === "driver")
+  // Rider Vehicle Details (shown when role === "both")
   const [vehicleType, setVehicleType] = useState<"Bike" | "Scooty" | "Car">("Bike");
-  const [vehicleModel, setVehicleModel] = useState("Bajaj Pulsar 150");
-  const [vehicleNumber, setVehicleNumber] = useState("KA 04 EK 7142");
+  const [vehicleModel, setVehicleModel] = useState("");
+  const [vehicleNumber, setVehicleNumber] = useState("");
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -57,9 +57,6 @@ export default function RegisterPage() {
 
   const handleSelectVehicleType = (type: "Bike" | "Scooty" | "Car") => {
     setVehicleType(type);
-    if (type === "Bike") setVehicleModel("Bajaj Pulsar 150");
-    else if (type === "Scooty") setVehicleModel("Honda Activa 6G");
-    else setVehicleModel("Maruti Swift Dzire");
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -82,7 +79,7 @@ export default function RegisterPage() {
       setErrorMessage("Passwords do not match.");
       return;
     }
-    if (role === "driver" && (!vehicleModel.trim() || !vehicleNumber.trim())) {
+    if (role === "both" && (!vehicleModel.trim() || !vehicleNumber.trim())) {
       setErrorMessage("Please enter your vehicle model and registration plate number.");
       return;
     }
@@ -99,7 +96,7 @@ export default function RegisterPage() {
           role,
           university: university.trim() || "Kristu Jayanti University",
           studentRollNumber: studentRollNumber.trim() || undefined,
-          ...(role === "driver"
+          ...(role === "both"
             ? {
                 vehicleType,
                 vehicleModel: vehicleModel.trim(),
@@ -112,12 +109,26 @@ export default function RegisterPage() {
 
       const data = await res.json();
       if (res.ok && data.user) {
-        setStoredUser(data.user, true);
+        let finalUser = data.user;
+        if (data.verificationToken) {
+          try {
+            await fetch("/api/auth/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token: data.verificationToken }),
+            });
+            const refreshed = await syncSession();
+            if (refreshed) finalUser = refreshed;
+          } catch {
+            // silent fallback
+          }
+        }
+        setStoredUser(finalUser, true);
         showToast(
-          role === "driver" ? "Rider Account Created! 🏍️" : "Student Account Created! 🎓",
-          role === "driver"
-            ? `Welcome ${data.user.name}! Your ${vehicleType} is live on HopOn.`
-            : `Welcome ${data.user.name}! You can now book campus rides.`,
+          role === "both" ? "Passenger & Rider Account Created! 🏍️" : "Student Account Created! 🎓",
+          role === "both"
+            ? `Welcome ${finalUser.name}! Your ${vehicleType} is registered on HopOn.`
+            : `Welcome ${finalUser.name}! You can now book campus rides.`,
           "success"
         );
         router.push("/home");
@@ -258,16 +269,16 @@ export default function RegisterPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
                   type="button"
-                  onClick={() => setRole("driver")}
+                  onClick={() => setRole("both")}
                   className={`p-3.5 rounded-2xl border-2 text-left transition-all cursor-pointer flex items-start gap-3 ${
-                    role === "driver"
+                    role === "both"
                       ? "border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/15"
                       : "border-slate-200 bg-white hover:bg-slate-50"
                   }`}
                 >
                   <div
                     className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-lg ${
-                      role === "driver"
+                      role === "both"
                         ? "bg-emerald-600 text-white shadow-sm"
                         : "bg-slate-100 text-slate-700"
                     }`}
@@ -277,16 +288,16 @@ export default function RegisterPage() {
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
                       <span className="text-sm font-extrabold text-slate-900">
-                        Register as Rider
+                        Both Rider &amp; Passenger
                       </span>
-                      {role === "driver" && (
+                      {role === "both" && (
                         <span className="px-1.5 py-0.2 rounded bg-emerald-600 text-white text-[9px] font-bold uppercase">
                           Selected
                         </span>
                       )}
                     </div>
                     <p className="text-[11px] text-slate-600 mt-0.5 leading-snug">
-                      Offer rides with your Bike, Scooty, or Car &amp; accept passenger requests
+                      Offer rides with your Bike, Scooty, or Car AND book rides as a passenger
                     </p>
                   </div>
                 </button>
@@ -312,7 +323,7 @@ export default function RegisterPage() {
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
                       <span className="text-sm font-extrabold text-slate-900">
-                        Register as Passenger
+                        Passenger Only
                       </span>
                       {role === "passenger" && (
                         <span className="px-1.5 py-0.2 rounded bg-blue-600 text-white text-[9px] font-bold uppercase">
@@ -321,7 +332,7 @@ export default function RegisterPage() {
                       )}
                     </div>
                     <p className="text-[11px] text-slate-600 mt-0.5 leading-snug">
-                      Find &amp; book campus rides with verified student riders
+                      Find &amp; book campus rides across campus (no vehicle required)
                     </p>
                   </div>
                 </button>
@@ -426,7 +437,7 @@ export default function RegisterPage() {
             </div>
 
             {/* 4. Rider Vehicle Details (shown when registering as Rider) */}
-            {role === "driver" && (
+            {role === "both" && (
               <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-200/90 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-900">
@@ -555,7 +566,7 @@ export default function RegisterPage() {
               type="submit"
               disabled={isLoading}
               className={`w-full mt-2 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl text-white font-bold text-sm sm:text-base shadow-md transition-all cursor-pointer disabled:opacity-70 ${
-                role === "driver"
+                role === "both"
                   ? "bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 shadow-emerald-500/20"
                   : "bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-blue-500/20"
               }`}
@@ -568,8 +579,8 @@ export default function RegisterPage() {
               ) : (
                 <>
                   <span>
-                    {role === "driver"
-                      ? `Complete Rider Registration (${vehicleType})`
+                    {role === "both"
+                      ? `Complete Passenger & Rider Registration (${vehicleType})`
                       : "Complete Student Passenger Registration"}
                   </span>
                   <ArrowRight className="w-4 h-4" />

@@ -57,6 +57,14 @@ export function parseVehicleType(value: unknown): VehicleType | null {
     : null;
 }
 
+/** Validates a vehicle registration plate (e.g. "KA 04 EK 7142" or "KA04EK7142"). */
+export function cleanVehicleNumber(value: unknown): string | null {
+  const cleaned = cleanText(value, 20);
+  if (!cleaned) return null;
+  const upper = cleaned.toUpperCase();
+  return /^[A-Z]{2}[\s-]?\d{1,2}[\s-]?[A-Z]{1,3}[\s-]?\d{3,4}$/.test(upper) ? upper : null;
+}
+
 /** Cars can seat up to 6 passengers; bikes and scooties carry one pillion rider. */
 export function maxSeatsFor(type: VehicleType): number {
   return type === "Car" ? 6 : 1;

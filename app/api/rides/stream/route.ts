@@ -7,6 +7,7 @@ import {
   listRequestsForDriver,
   listRequestsForPassenger,
   subscribeRideEvents,
+  toDriverView,
 } from "@/lib/rideStore";
 
 export const dynamic = "force-dynamic";
@@ -23,17 +24,20 @@ export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
   let cleanup: (() => void) | null = null;
 
+  const isDriver =
+    user.role === "driver" ||
+    user.role === "both" ||
+    Boolean(user.vehicleModel || user.vehicleNumber);
+
   const buildSnapshot = () => {
-    if (user.role === "driver") {
-      const requests = listRequestsForDriver(user.id).map((r) => ({
-        ...r,
-        offer: r.offerId ? getOffer(r.offerId) : undefined,
-      }));
-      const offers = listActiveOffers().filter((o) => o.driverId === user.id);
-      const activeAccepted = requests.find((r) => r.status === "accepted");
+    if (isDriver) {
+      const rawRequests = listRequestsForDriver(user.id);
+      const activeAccepted = rawRequests.find((r) => r.status === "accepted");
       const counterpartyLocation = activeAccepted
         ? getDriverLocation(activeAccepted.passengerId) ?? null
         : null;
+      const requests = rawRequests.map((r) => toDriverView(r));
+      const offers = listActiveOffers().filter((o) => o.driverId === user.id);
       return {
         role: "driver",
         requests,
@@ -42,10 +46,15 @@ export async function GET(req: NextRequest) {
         timestamp: Date.now(),
       };
     } else {
-      const requests = listRequestsForPassenger(user.id).map((r) => ({
-        ...r,
-        offer: r.offerId ? getOffer(r.offerId) : undefined,
-      }));
+      const requests = listRequestsForPassenger(user.id).map((r) => {
+        // Strip internal declinedBy driver IDs from passenger view
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { declinedBy, ...cleanReq } = r;
+        return {
+          ...cleanReq,
+          offer: r.offerId ? getOffer(r.offerId) : undefined,
+        };
+      });
       const activeAccepted = requests.find((r) => r.status === "accepted");
       const driverId = activeAccepted?.offer?.driverId;
       const counterpartyLocation = driverId ? getDriverLocation(driverId) ?? null : null;
@@ -58,8 +67,42 @@ export async function GET(req: NextRequest) {
     }
   };
 
+  const isSubscriberAffected = (evt: {
+    type: "offer" | "request" | "location" | "message";
+    requestId?: string;
+    userId?: string;
+    timestamp: number;
+  }): boolean => {
+    if (evt.userId === user.id) return true;
+    const myRequests =
+      isDriver ? listRequestsForDriver(user.id) : listRequestsForPassenger(user.id);
+    if (evt.requestId) {
+      return myRequests.some((r) => r.id === evt.requestId);
+    }
+    if (evt.type === "location" && evt.userId) {
+      return myRequests.some((r) => {
+        if (r.status !== "accepted") return false;
+        const offerDriverId = r.offerId ? getOffer(r.offerId)?.driverId : undefined;
+        return r.passengerId === evt.userId || offerDriverId === evt.userId;
+      });
+    }
+    if (evt.type === "offer") {
+      // Broadcast to both drivers and passengers so real-time available rides update immediately
+      return true;
+    }
+    return false;
+  };
+
   const stream = new ReadableStream({
     start(controller) {
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+      let latestEvt: {
+        type: "offer" | "request" | "location" | "message";
+        requestId?: string;
+        userId?: string;
+        timestamp: number;
+      } | null = null;
+
       const sendEvent = (eventName: string, data: unknown) => {
         try {
           controller.enqueue(
@@ -74,10 +117,17 @@ export async function GET(req: NextRequest) {
       sendEvent("snapshot", buildSnapshot());
 
       const unsubscribe = subscribeRideEvents((evt) => {
-        sendEvent("update", {
-          event: evt,
-          ...buildSnapshot(),
-        });
+        if (!isSubscriberAffected(evt)) return;
+        latestEvt = evt;
+        if (debounceTimer) return;
+        debounceTimer = setTimeout(() => {
+          debounceTimer = null;
+          if (!latestEvt) return;
+          sendEvent("update", {
+            event: latestEvt,
+            ...buildSnapshot(),
+          });
+        }, 100);
       });
 
       const heartbeat = setInterval(() => {
@@ -90,6 +140,10 @@ export async function GET(req: NextRequest) {
 
       cleanup = () => {
         unsubscribe();
+        if (debounceTimer) {
+          clearTimeout(debounceTimer);
+          debounceTimer = null;
+        }
         clearInterval(heartbeat);
       };
 

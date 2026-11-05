@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, Poppins } from "next/font/google";
+import { headers } from "next/headers";
 import "./globals.css";
 import { ToastProvider } from "@/components/ToastContext";
 
@@ -22,11 +23,14 @@ export const metadata: Metadata = {
   keywords: ["ride-sharing", "students", "carpool", "campus rides", "HopOn"],
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // Reading request headers opts every page into dynamic rendering so Next.js can attach the
+  // per-request CSP nonce issued by proxy.ts to its scripts.
+  await headers();
   return (
     <html lang="en" suppressHydrationWarning className={`${inter.variable} ${poppins.variable} h-full antialiased`}>
       {/* suppressHydrationWarning: browser extensions often mutate <body> attributes before React hydrates */}

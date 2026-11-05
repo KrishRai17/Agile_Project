@@ -15,10 +15,9 @@ import {
 } from "lucide-react";
 
 interface TrackingSnapshot {
-  requestId: string;
-  status: "pending" | "accepted" | "rejected" | "cancelled";
+  status: "pending" | "accepted" | "rejected" | "cancelled" | "completed";
   tripStage: "en_route_pickup" | "arrived_pickup" | "in_progress";
-  passengerName: string;
+  passengerFirstName: string;
   pickup: string;
   pickupLat: number;
   pickupLng: number;
@@ -26,32 +25,29 @@ interface TrackingSnapshot {
   dropoffLat: number;
   dropoffLng: number;
   driverName?: string;
-  driverUniversity?: string;
-  driverRating?: number;
   vehicleModel?: string;
-  vehicleNumber?: string;
   vehicleType?: string;
-  farePerSeat?: string;
   driverLiveLocation?: { lat: number; lng: number; updatedAt: number } | null;
   passengerLiveLocation?: { lat: number; lng: number; updatedAt: number } | null;
   createdAt: number;
   arrivedAt?: number;
   startedAt?: number;
+  completedAt?: number;
 }
 
 export default function LiveTripTrackingPage() {
-  const params = useParams<{ requestId: string }>();
-  const requestId = params?.requestId ?? "";
+  const params = useParams<{ token: string }>();
+  const token = params?.token ?? "";
   const [tracking, setTracking] = useState<TrackingSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!requestId) return;
+    if (!token) return;
     let cancelled = false;
 
     const fetchTracking = async () => {
       try {
-        const res = await fetch(`/api/rides/track?requestId=${encodeURIComponent(requestId)}`, {
+        const res = await fetch(`/api/rides/track?token=${encodeURIComponent(token)}`, {
           cache: "no-store",
         });
         const data = await res.json();
@@ -60,6 +56,7 @@ export default function LiveTripTrackingPage() {
           setTracking(data.tracking);
           setError(null);
         } else {
+          setTracking(null);
           setError(data.error || "Live ride tracking link expired or not found.");
         }
       } catch {
@@ -73,7 +70,7 @@ export default function LiveTripTrackingPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [requestId]);
+  }, [token]);
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 sm:p-6">
@@ -109,7 +106,7 @@ export default function LiveTripTrackingPage() {
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center">
-                    {tracking.status === "cancelled" ? (
+                    {tracking.status === "completed" ? (
                       <CheckCircle2 className="w-5 h-5" />
                     ) : (
                       <Navigation className="w-5 h-5" />
@@ -117,7 +114,7 @@ export default function LiveTripTrackingPage() {
                   </div>
                   <div>
                     <p className="text-xs font-extrabold text-slate-900 uppercase tracking-wider">
-                      {tracking.status === "cancelled"
+                      {tracking.status === "completed"
                         ? "Trip Completed"
                         : tracking.tripStage === "in_progress"
                         ? "En Route to Destination (OTP Verified)"
@@ -126,13 +123,13 @@ export default function LiveTripTrackingPage() {
                         : "Driver En Route to Pickup"}
                     </p>
                     <p className="text-xs text-slate-500">
-                      Passenger: <span className="font-semibold text-slate-800">{tracking.passengerName}</span>
+                      Passenger:{" "}
+                      <span className="font-semibold text-slate-800">
+                        {tracking.passengerFirstName}
+                      </span>
                     </p>
                   </div>
                 </div>
-                {tracking.farePerSeat && (
-                  <span className="text-base font-black text-blue-600">₹{tracking.farePerSeat}</span>
-                )}
               </div>
 
               {/* Driver & Vehicle Details */}
@@ -143,20 +140,12 @@ export default function LiveTripTrackingPage() {
                       <Car className="w-5 h-5" />
                     </div>
                     <div>
-                      <p className="text-sm font-bold text-slate-900">
-                        {tracking.driverName}{" "}
-                        {tracking.driverRating ? `· ★ ${tracking.driverRating}` : ""}
-                      </p>
+                      <p className="text-sm font-bold text-slate-900">{tracking.driverName}</p>
                       <p className="text-xs text-slate-600">
                         {tracking.vehicleModel} ({tracking.vehicleType})
                       </p>
                     </div>
                   </div>
-                  {tracking.vehicleNumber && (
-                    <span className="px-2.5 py-1 rounded-lg bg-white border border-emerald-300 text-xs font-black text-slate-900 tracking-wider">
-                      {tracking.vehicleNumber}
-                    </span>
-                  )}
                 </div>
               )}
 

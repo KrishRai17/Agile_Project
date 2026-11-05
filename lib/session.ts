@@ -17,6 +17,7 @@ export interface SessionPayload {
   uid: string;
   iat: number;
   exp: number;
+  ver?: number;
 }
 
 const DEV_SECRET = "hopon-dev-only-secret-do-not-use-in-production";
@@ -38,10 +39,16 @@ export function createSessionToken(
   uid: string,
   ttlSeconds: number = SESSION_TTL_SECONDS,
   secret: string = getSessionSecret(),
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  sessionVersion?: number | null
 ): string {
   const iat = Math.floor(nowMs / 1000);
-  const payload: SessionPayload = { uid, iat, exp: iat + ttlSeconds };
+  const payload: SessionPayload = {
+    uid,
+    iat,
+    exp: iat + ttlSeconds,
+    ...(sessionVersion !== null ? { ver: sessionVersion ?? 1 } : {}),
+  };
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   return `${body}.${sign(body, secret)}`;
 }

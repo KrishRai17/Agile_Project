@@ -9,7 +9,10 @@ export interface User {
   avatarUrl?: string;
   rating: number;
   ridesCompleted: number;
-  role?: "passenger" | "driver";
+  role?: "passenger" | "driver" | "both";
+  vehicleModel?: string;
+  vehicleNumber?: string;
+  vehicleType?: string;
 }
 
 export const DEMO_ACCOUNT = {

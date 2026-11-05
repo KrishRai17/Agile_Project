@@ -97,6 +97,46 @@ export const BENGALURU_LOCATIONS: LocationItem[] = [
     lng: 77.5898,
     category: "landmark",
   },
+  {
+    id: "loc_chagalatti",
+    name: "Chagalatti Bus Stand",
+    address: "Bagalur Main Road, Chagalatti, Bengaluru 562149",
+    lat: 13.11624,
+    lng: 77.63451,
+    category: "transit",
+  },
+  {
+    id: "loc_kothanur",
+    name: "Kothanur Main Bus Stop",
+    address: "Hennur-Bagalur Main Rd, Kothanur, Bengaluru 560077",
+    lat: 13.06042,
+    lng: 77.64891,
+    category: "transit",
+  },
+  {
+    id: "loc_elements_mall",
+    name: "Elements Mall (Thanisandra)",
+    address: "Thanisandra Main Road, Nagavara, Bengaluru 560077",
+    lat: 13.04628,
+    lng: 77.62954,
+    category: "landmark",
+  },
+  {
+    id: "loc_hennur_cross",
+    name: "Hennur Cross Junction",
+    address: "Outer Ring Road & Hennur Main Rd Underpass, Bengaluru",
+    lat: 13.02635,
+    lng: 77.63682,
+    category: "transit",
+  },
+  {
+    id: "loc_hebbal",
+    name: "Hebbal Flyover Bus Bay",
+    address: "Bellary Road (NH 44), Hebbal, Bengaluru",
+    lat: 13.03582,
+    lng: 77.59705,
+    category: "transit",
+  },
 ];
 
 // High-precision designated campus pickup locations for Kristu Jayanti University
@@ -104,7 +144,7 @@ export const CAMPUS_PICKUP_POINTS: LocationItem[] = [
   {
     id: "kju_gate1",
     name: "Main Gate 1",
-    address: "K. Narayanapura Main Road, KJU Front Entrance",
+    address: "K. Narayanapura Main Road, KJU Front Entrance Arch",
     lat: 13.0583,
     lng: 77.6426,
     category: "campus",
@@ -112,15 +152,23 @@ export const CAMPUS_PICKUP_POINTS: LocationItem[] = [
   {
     id: "kju_gate2",
     name: "Gate 2 (Sports Arena)",
-    address: "Near Kristu Jayanti Sports Complex & Grounds",
+    address: "Near Kristu Jayanti Sports Complex & Turf Grounds",
     lat: 13.0628,
     lng: 77.6433,
     category: "campus",
   },
   {
+    id: "kju_gate3",
+    name: "Gate 3 (Hostel Gate)",
+    address: "KJU Back Gate & Student Hostel Lane, K. Narayanapura",
+    lat: 13.05964,
+    lng: 77.64415,
+    category: "campus",
+  },
+  {
     id: "kju_quad",
     name: "Admin Quadrangle",
-    address: "Main College Administrative Quadrangle",
+    address: "Main College Administrative Block Drop Bay",
     lat: 13.0579,
     lng: 77.6424,
     category: "campus",
@@ -128,15 +176,23 @@ export const CAMPUS_PICKUP_POINTS: LocationItem[] = [
   {
     id: "kju_pg_block",
     name: "PG & MBA Block",
-    address: "Post Graduate Centre & Management Block, KJU",
+    address: "Post Graduate Centre & Management Block Entrance, KJU",
     lat: 13.059,
     lng: 77.6428,
     category: "campus",
   },
   {
+    id: "kju_chavara",
+    name: "Chavara Square Cafeteria",
+    address: "KJU Food Court & Student Plaza Pickup Point",
+    lat: 13.05815,
+    lng: 77.64305,
+    category: "campus",
+  },
+  {
     id: "kju_bus_bay",
     name: "Campus Bus Bay",
-    address: "College Bus Stop & Auto Stand, K. Narayanapura",
+    address: "College Bus Stop & Auto Stand, K. Narayanapura Main Rd",
     lat: 13.0572,
     lng: 77.6418,
     category: "transit",
@@ -354,4 +410,20 @@ export interface AcceptedRideRoute {
     name: string;
   };
 }
+
+export interface MatchingCampusRide {
+  id: string;
+  driverId: string;
+  driverName: string;
+  driverRating: number;
+  vehicleModel: string;
+  vehicleNumber: string;
+  departureTime: string;
+  leavesIn: string;
+  seatsLeft: number;
+  price: number;
+  isBestMatch?: boolean;
+}
+
+export const DEFAULT_MATCHING_RIDES: MatchingCampusRide[] = [];
 

@@ -3,13 +3,15 @@
  * and `trip_history` tables in `.data/hopon.sqlite`), with optional JSON snapshot compatibility
  * via `HOPON_PERSIST_FILE`.
  */
-import { randomInt } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { getDb } from "./db";
+import { isDemoEnabled, isDriverVerified } from "./accounts";
+import { getDb, recordWalletLedger } from "./db";
+import { haversineKm, KJU_COORDS } from "./campus";
 
 export type RideOfferStatus = "active" | "full" | "cancelled";
-export type RideRequestStatus = "pending" | "accepted" | "rejected" | "cancelled";
+export type RideRequestStatus = "pending" | "accepted" | "rejected" | "cancelled" | "completed";
 export type RideTripStage = "en_route_pickup" | "arrived_pickup" | "in_progress";
 
 export interface RideOffer {
@@ -53,12 +55,21 @@ export interface RideRequest {
   dropoffLng: number;
   status: RideRequestStatus;
   note?: string;
+  /** Fare per seat agreed and locked when the driver accepts the ride request. */
+  agreedFare?: string;
   /** 4-digit random OTP generated when a driver accepts the request; changes on every new ride. */
   otp?: string;
+  /** Number of consecutive wrong OTP attempts on this request. */
+  otpAttempts?: number;
+  /** Timestamp (ms) until which OTP verification is locked after 5 wrong tries. */
+  otpLockedUntil?: number;
+  /** Random unguessable token for public tracking (`/track/[token]`). */
+  shareToken?: string;
   /** Live trip progression once accepted: en_route_pickup -> arrived_pickup -> in_progress (heading to dropoff). */
   tripStage?: RideTripStage;
   arrivedAt?: number;
   startedAt?: number;
+  completedAt?: number;
   createdAt: number;
   respondedAt?: number;
 }
@@ -118,12 +129,13 @@ export function subscribeRideEvents(listener: RideEventListener): () => void {
   };
 }
 
-function emitRideEvent(
-  type: "offer" | "request" | "location" | "message",
+export function emitRideEvent(
+  type: "offer" | "request" | "location" | "message" | "offers:changed",
   meta?: { requestId?: string; userId?: string }
 ): void {
+  const normalizedType = type === "offers:changed" ? "offer" : type;
   const payload = {
-    type,
+    type: normalizedType,
     requestId: meta?.requestId,
     userId: meta?.userId,
     timestamp: Date.now(),
@@ -141,6 +153,8 @@ function emitRideEvent(
 
 /** Finished requests and old offers are dropped after this long. */
 export const TERMINAL_TTL_MS = 24 * 60 * 60 * 1000;
+/** Public tracking links remain valid for 10 minutes after a ride is completed so viewers see "Trip Completed". */
+export const COMPLETED_TRACKING_TTL_MS = 10 * 60 * 1000;
 /** A pending request nobody answered within this long is cancelled automatically. */
 export const PENDING_TTL_MS = 2 * 60 * 60 * 1000;
 /** Live driver locations older than this are dropped. */
@@ -161,6 +175,7 @@ interface PersistedState {
 interface HoponStore {
   offers: Map<string, RideOffer>;
   requests: Map<string, RideRequest>;
+  shareTokenIndex: Map<string, string>;
   driverLiveLocations: Map<string, DriverLiveLocation>;
   counters: { offer: number; request: number };
   lastOtp?: string;
@@ -205,10 +220,15 @@ interface DbRequestRow {
   dropoff_lng: number;
   status: RideRequestStatus;
   note: string | null;
+  agreed_fare: string | null;
   otp: string | null;
+  otp_attempts: number | null;
+  otp_locked_until: number | null;
+  share_token: string | null;
   trip_stage: RideTripStage | null;
   arrived_at: number | null;
   started_at: number | null;
+  completed_at: number | null;
   created_at: number;
   responded_at: number | null;
 }
@@ -222,7 +242,7 @@ interface DbLocationRow {
   updated_at: number;
 }
 
-function saveOfferToDb(offer: RideOffer): void {
+function saveOfferToDb(offer: RideOffer, emit: boolean = true): void {
   try {
     const db = getDb();
     db.prepare(
@@ -255,29 +275,34 @@ function saveOfferToDb(offer: RideOffer): void {
       offer.status,
       offer.createdAt
     );
+  } catch (err) {
+    console.error("saveOfferToDb failed:", err);
+    throw err;
+  }
+  if (emit) {
     emitRideEvent("offer", { userId: offer.driverId });
-  } catch {
-    // Non-fatal in constrained test environments
   }
 }
 
 function deleteOfferFromDb(id: string): void {
   try {
     getDb().prepare("DELETE FROM ride_offers WHERE id = ?").run(id);
-  } catch {
-    // silent
+  } catch (err) {
+    console.error("deleteOfferFromDb failed:", err);
+    throw err;
   }
 }
 
-function saveRequestToDb(req: RideRequest): void {
+function saveRequestToDb(req: RideRequest, emit: boolean = true): void {
   try {
     const db = getDb();
     db.prepare(
       `INSERT OR REPLACE INTO ride_requests (
         id, offer_id, declined_by, passenger_id, passenger_name, passenger_rating,
         pickup, pickup_lat, pickup_lng, dropoff, dropoff_lat, dropoff_lng,
-        status, note, otp, trip_stage, arrived_at, started_at, created_at, responded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, note, agreed_fare, otp, otp_attempts, otp_locked_until, share_token,
+        trip_stage, arrived_at, started_at, completed_at, created_at, responded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       req.id,
       req.offerId ?? null,
@@ -293,28 +318,39 @@ function saveRequestToDb(req: RideRequest): void {
       req.dropoffLng,
       req.status,
       req.note ?? null,
+      req.agreedFare ?? null,
       req.otp ?? null,
+      req.otpAttempts ?? 0,
+      req.otpLockedUntil ?? null,
+      req.shareToken ?? null,
       req.tripStage ?? null,
       req.arrivedAt ?? null,
       req.startedAt ?? null,
+      req.completedAt ?? null,
       req.createdAt,
       req.respondedAt ?? null
     );
+  } catch (err) {
+    console.error("saveRequestToDb failed:", err);
+    throw err;
+  }
+  if (emit) {
     emitRideEvent("request", { requestId: req.id, userId: req.passengerId });
-  } catch {
-    // silent
   }
 }
 
 function deleteRequestFromDb(id: string): void {
   try {
-    getDb().prepare("DELETE FROM ride_requests WHERE id = ?").run(id);
-  } catch {
-    // silent
+    const db = getDb();
+    db.prepare("DELETE FROM ride_messages WHERE request_id = ?").run(id);
+    db.prepare("DELETE FROM ride_requests WHERE id = ?").run(id);
+  } catch (err) {
+    console.error("deleteRequestFromDb failed:", err);
+    throw err;
   }
 }
 
-function saveLocationToDb(loc: DriverLiveLocation): void {
+function saveLocationToDb(loc: DriverLiveLocation, emit: boolean = true): void {
   try {
     getDb()
       .prepare(
@@ -322,17 +358,21 @@ function saveLocationToDb(loc: DriverLiveLocation): void {
          VALUES (?, ?, ?, ?, ?, ?)`
       )
       .run(loc.driverId, loc.lat, loc.lng, loc.heading ?? null, loc.speed ?? null, loc.updatedAt);
+  } catch (err) {
+    console.error("saveLocationToDb failed:", err);
+    throw err;
+  }
+  if (emit) {
     emitRideEvent("location", { userId: loc.driverId });
-  } catch {
-    // silent
   }
 }
 
 function deleteLocationFromDb(driverId: string): void {
   try {
     getDb().prepare("DELETE FROM driver_locations WHERE driver_id = ?").run(driverId);
-  } catch {
-    // silent
+  } catch (err) {
+    console.error("deleteLocationFromDb failed:", err);
+    throw err;
   }
 }
 
@@ -368,8 +408,9 @@ function recordTripHistory(req: RideRequest, offer: RideOffer | undefined, statu
         db.prepare("UPDATE users SET rides_completed = rides_completed + 1 WHERE id = ?").run(offer.driverId);
       }
     }
-  } catch {
-    // silent
+  } catch (err) {
+    console.error("recordTripHistory failed:", err);
+    throw err;
   }
 }
 
@@ -430,13 +471,21 @@ function hydrateFromSqlite(target: HoponStore): void {
         dropoffLng: r.dropoff_lng,
         status: r.status,
         note: r.note ?? undefined,
+        agreedFare: r.agreed_fare ?? undefined,
         otp: r.otp ?? undefined,
+        otpAttempts: r.otp_attempts ?? 0,
+        otpLockedUntil: r.otp_locked_until ?? undefined,
+        shareToken: r.share_token ?? undefined,
         tripStage: r.trip_stage ?? undefined,
         arrivedAt: r.arrived_at ?? undefined,
         startedAt: r.started_at ?? undefined,
+        completedAt: r.completed_at ?? undefined,
         createdAt: r.created_at,
         respondedAt: r.responded_at ?? undefined,
       });
+      if (r.share_token) {
+        target.shareTokenIndex.set(r.share_token, r.id);
+      }
       const tail = Number(r.id.split("_").pop());
       if (Number.isFinite(tail)) {
         target.counters.request = Math.max(target.counters.request, tail + 1);
@@ -454,33 +503,42 @@ function hydrateFromSqlite(target: HoponStore): void {
         updatedAt: l.updated_at,
       });
     }
-  } catch {
-    // silent
+  } catch (err) {
+    console.error("hydrateFromSqlite failed:", err);
   }
 }
 
 function hydrate(target: HoponStore): void {
+  hydrateFromSqlite(target);
   if (PERSIST_FILE) {
     if (!existsSync(PERSIST_FILE)) return;
     try {
       const parsed = JSON.parse(readFileSync(PERSIST_FILE, "utf8")) as PersistedState;
       if (parsed.version !== 1) return;
-      for (const offer of parsed.offers ?? []) target.offers.set(offer.id, offer);
-      for (const request of parsed.requests ?? []) target.requests.set(request.id, request);
+      for (const offer of parsed.offers ?? []) {
+        target.offers.set(offer.id, offer);
+        saveOfferToDb(offer, false);
+      }
+      for (const request of parsed.requests ?? []) {
+        target.requests.set(request.id, request);
+        if (request.shareToken) {
+          target.shareTokenIndex.set(request.shareToken, request.id);
+        }
+        saveRequestToDb(request, false);
+      }
       target.counters.offer = Math.max(target.counters.offer, parsed.counters?.offer ?? 1);
       target.counters.request = Math.max(target.counters.request, parsed.counters?.request ?? 1);
     } catch (error) {
       console.warn("Could not load persisted ride store, starting empty:", error);
     }
-    return;
   }
-  hydrateFromSqlite(target);
 }
 
 function createStore(): HoponStore {
   const fresh: HoponStore = {
     offers: new Map(),
     requests: new Map(),
+    shareTokenIndex: new Map(),
     driverLiveLocations: new Map(),
     counters: { offer: 1, request: 1 },
   };
@@ -490,6 +548,7 @@ function createStore(): HoponStore {
 
 const globalForStore = globalThis as unknown as { __hoponStore?: HoponStore };
 const store: HoponStore = (globalForStore.__hoponStore ??= createStore());
+const shareTokenIndex = (store.shareTokenIndex ??= new Map<string, string>());
 
 const offers = store.offers;
 const requests = store.requests;
@@ -546,6 +605,7 @@ function generateFourDigitOtp(): string {
 const SEED_PREFIX = "offer_seed_";
 
 function seedDefaultOffer(): void {
+  if (!isDemoEnabled()) return;
   if (offers.size === 0) {
     const seeds: RideOffer[] = [
       {
@@ -620,7 +680,7 @@ function seedDefaultOffer(): void {
     ];
     for (const s of seeds) {
       offers.set(s.id, s);
-      saveOfferToDb(s);
+      saveOfferToDb(s, false);
     }
   }
 }
@@ -646,6 +706,9 @@ export function pruneStore(now: number = Date.now()): { offers: number; requests
       saveRequestToDb(req);
     }
     if (req.status !== "pending" && now - (req.respondedAt ?? req.createdAt) > TERMINAL_TTL_MS) {
+      if (req.shareToken) {
+        shareTokenIndex.delete(req.shareToken);
+      }
       requests.delete(id);
       deleteRequestFromDb(id);
       removedRequests++;
@@ -667,6 +730,17 @@ export function pruneStore(now: number = Date.now()): { offers: number; requests
       deleteLocationFromDb(driverId);
       removedLocations++;
     }
+  }
+
+  try {
+    const db = getDb();
+    db.prepare(
+      `DELETE FROM ride_messages
+       WHERE created_at < ? OR request_id NOT IN (SELECT id FROM ride_requests)`
+    ).run(now - TERMINAL_TTL_MS);
+    db.prepare("DELETE FROM driver_locations WHERE updated_at < ?").run(now - STALE_LOCATION_MS);
+  } catch (err) {
+    console.error("pruneStore SQLite cleanup failed:", err);
   }
 
   if (removedRequests || removedOffers) schedulePersist();
@@ -691,6 +765,9 @@ export function getOffer(id: string): RideOffer | undefined {
 export function createOffer(
   data: Omit<RideOffer, "id" | "createdAt" | "seatsLeft" | "status">
 ): RideOffer {
+  if (!isDriverVerified(data.driverId)) {
+    throw new Error("Please verify your university email before posting ride offers.");
+  }
   pruneStore();
   const id = offerKey();
   const offer: RideOffer = {
@@ -707,18 +784,116 @@ export function createOffer(
 }
 
 export function listRequestsForDriver(driverId: string): RideRequest[] {
+  if (!isDriverVerified(driverId)) {
+    return [];
+  }
   const driverOfferIds = new Set(
     Array.from(offers.values())
       .filter((o) => o.driverId === driverId)
       .map((o) => o.id)
   );
-  // A driver sees requests tied to their own offers, plus every open pending request
-  // they haven't passed on.
-  return Array.from(requests.values()).filter((r) =>
-    r.offerId
-      ? driverOfferIds.has(r.offerId)
-      : r.status === "pending" && !r.declinedBy.includes(driverId)
+
+  const driverLiveLoc = driverLiveLocations.get(driverId);
+  const driverActiveOffer = Array.from(offers.values()).find(
+    (o) => o.driverId === driverId && o.status === "active"
   );
+  const anchorLat = driverLiveLoc?.lat ?? driverActiveOffer?.fromLat ?? KJU_COORDS.lat;
+  const anchorLng = driverLiveLoc?.lng ?? driverActiveOffer?.fromLng ?? KJU_COORDS.lng;
+  const snap = (n: number) => Math.round(n * 100) / 100;
+  const snappedAnchorLat = snap(anchorLat);
+  const snappedAnchorLng = snap(anchorLng);
+
+  // A driver sees requests tied to their own offers, plus nearby open pending requests
+  // within the university service area (~30 km of their active route origin or current GPS position).
+  return Array.from(requests.values()).filter((r) => {
+    if (r.offerId) {
+      return driverOfferIds.has(r.offerId);
+    }
+    if (r.status !== "pending" || r.declinedBy.includes(driverId)) {
+      return false;
+    }
+    const dist = haversineKm(snappedAnchorLat, snappedAnchorLng, snap(r.pickupLat), snap(r.pickupLng));
+    return dist <= 30.0;
+  });
+}
+
+export interface DriverRideRequestView {
+  id: string;
+  offerId: string | null;
+  passengerName: string;
+  passengerRating: number;
+  pickup: string;
+  pickupLat: number;
+  pickupLng: number;
+  dropoff: string;
+  dropoffLat: number;
+  dropoffLng: number;
+  status: RideRequestStatus;
+  note?: string;
+  agreedFare?: string;
+  tripStage?: RideTripStage;
+  createdAt: number;
+  respondedAt?: number;
+  arrivedAt?: number;
+  startedAt?: number;
+  completedAt?: number;
+  offer?: RideOffer;
+}
+
+/**
+ * Whitelists the fields of a `RideRequest` that a driver is allowed to see.
+ * Never includes `otp`, `otpAttempts`, `otpLockedUntil`, `shareToken`, `declinedBy`, or `passengerId`.
+ * For unaccepted requests, masks exact coordinates to ~1km and strips curb notes until accepted.
+ */
+export function toDriverView(req: RideRequest): DriverRideRequestView {
+  const offer = req.offerId ? offers.get(req.offerId) : undefined;
+  const isAcceptedOrBeyond =
+    req.status === "accepted" || req.status === "completed";
+
+  // For unaccepted requests, coarse the pickup coordinates (~1.1km) and mask specific curb notes
+  const pickupLat = isAcceptedOrBeyond
+    ? req.pickupLat
+    : Math.round(req.pickupLat * 100) / 100;
+  const pickupLng = isAcceptedOrBeyond
+    ? req.pickupLng
+    : Math.round(req.pickupLng * 100) / 100;
+  const dropoffLat = isAcceptedOrBeyond
+    ? req.dropoffLat
+    : Math.round(req.dropoffLat * 100) / 100;
+  const dropoffLng = isAcceptedOrBeyond
+    ? req.dropoffLng
+    : Math.round(req.dropoffLng * 100) / 100;
+
+  const pickup = isAcceptedOrBeyond
+    ? req.pickup
+    : req.pickup.replace(/\s*\([^)]*\)/g, "").trim();
+
+  const dropoff = isAcceptedOrBeyond
+    ? req.dropoff
+    : req.dropoff.replace(/\s*\([^)]*\)/g, "").trim();
+
+  return {
+    id: req.id,
+    offerId: req.offerId,
+    passengerName: req.passengerName,
+    passengerRating: req.passengerRating,
+    pickup,
+    pickupLat,
+    pickupLng,
+    dropoff,
+    dropoffLat,
+    dropoffLng,
+    status: req.status,
+    ...(isAcceptedOrBeyond && req.note !== undefined ? { note: req.note } : {}),
+    ...(req.agreedFare !== undefined ? { agreedFare: req.agreedFare } : {}),
+    ...(req.tripStage !== undefined ? { tripStage: req.tripStage } : {}),
+    createdAt: req.createdAt,
+    ...(req.respondedAt !== undefined ? { respondedAt: req.respondedAt } : {}),
+    ...(req.arrivedAt !== undefined ? { arrivedAt: req.arrivedAt } : {}),
+    ...(req.startedAt !== undefined ? { startedAt: req.startedAt } : {}),
+    ...(req.completedAt !== undefined ? { completedAt: req.completedAt } : {}),
+    ...(offer !== undefined ? { offer } : {}),
+  };
 }
 
 export function listRequestsForPassenger(passengerId: string): RideRequest[] {
@@ -773,13 +948,28 @@ export function createRequest(
 export function respondToRequest(
   requestId: string,
   driverId: string,
-  action: "accept" | "reject"
+  action: "accept" | "reject",
+  driverPosition?: { lat: number; lng: number; name?: string }
 ): RideRequest | { error: string } {
   const req = requests.get(requestId);
   if (!req) return { error: "Request not found." };
   if (req.passengerId === driverId) return { error: "You can't respond to your own request." };
+  if (!isDriverVerified(driverId)) {
+    return { error: "Please verify your university email before accepting or declining ride requests." };
+  }
   // First driver to accept wins; later attempts land here.
   if (req.status !== "pending") return { error: "Request already handled." };
+
+  if (action === "accept") {
+    const activeDriverRide = Array.from(requests.values()).find((r) => {
+      if (r.status !== "accepted" || !r.offerId) return false;
+      const o = offers.get(r.offerId);
+      return o?.driverId === driverId;
+    });
+    if (activeDriverRide) {
+      return { error: "You already have an active accepted ride in progress." };
+    }
+  }
 
   let offer: RideOffer | undefined;
   if (req.offerId) {
@@ -800,7 +990,25 @@ export function respondToRequest(
       (o) => o.driverId === driverId && o.status === "active" && o.seatsLeft > 0
     );
     if (!offer) return { error: "Post a ride first so passengers can see your vehicle." };
+  }
+
+  if (action === "accept") {
+    const numericFare = Math.max(
+      0,
+      Math.round(Number(String(offer.farePerSeat ?? "0").replace(/[^\d.]/g, "")) || 0)
+    );
+    if (numericFare > 0) {
+      const pRow = getDb()
+        .prepare("SELECT wallet_balance FROM users WHERE id = ?")
+        .get(req.passengerId) as { wallet_balance: number } | undefined;
+      if (pRow && pRow.wallet_balance < numericFare) {
+        return {
+          error: "Passenger has insufficient HopOn Wallet balance to cover this ride fare.",
+        };
+      }
+    }
     req.offerId = offer.id;
+    req.agreedFare = offer.farePerSeat;
   }
 
   req.status = action === "accept" ? "accepted" : "rejected";
@@ -811,6 +1019,29 @@ export function respondToRequest(
     req.tripStage = "en_route_pickup";
     offer.seatsLeft = Math.max(0, offer.seatsLeft - 1);
     if (offer.seatsLeft === 0) offer.status = "full";
+
+    // Lock the rider's exact real-time GPS position into both driverLiveLocations and the offer start point
+    if (
+      driverPosition &&
+      Number.isFinite(driverPosition.lat) &&
+      Number.isFinite(driverPosition.lng)
+    ) {
+      const exactLat = Number(driverPosition.lat.toFixed(6));
+      const exactLng = Number(driverPosition.lng.toFixed(6));
+      offer.fromLat = exactLat;
+      offer.fromLng = exactLng;
+      if (driverPosition.name && driverPosition.name.trim()) {
+        offer.from = driverPosition.name.trim();
+      }
+      updateDriverLocation(driverId, exactLat, exactLng);
+    } else {
+      const existingLive = driverLiveLocations.get(driverId);
+      if (existingLive) {
+        offer.fromLat = Number(existingLive.lat.toFixed(6));
+        offer.fromLng = Number(existingLive.lng.toFixed(6));
+      }
+    }
+
     offers.set(offer.id, offer);
     saveOfferToDb(offer);
   }
@@ -849,15 +1080,20 @@ export function markDriverArrived(
   return req;
 }
 
+export const MAX_OTP_ATTEMPTS = 5;
+export const OTP_LOCKOUT_MS = 10 * 60 * 1000;
+
 /**
  * Accepting driver submits the 4-digit OTP given by the passenger at pickup.
  * When matched, transitions `tripStage` to `"in_progress"` to unlock the dropoff route.
+ * Locks verification for 10 minutes after 5 wrong tries.
  */
 export function verifyRideOtp(
   requestId: string,
   driverId: string,
-  otpInput: string
-): RideRequest | { error: string } {
+  otpInput: string,
+  now: number = Date.now()
+): RideRequest | { error: string; locked?: boolean } {
   const req = requests.get(requestId);
   if (!req) return { error: "Request not found." };
   if (req.status !== "accepted" || !req.offerId) {
@@ -870,19 +1106,218 @@ export function verifyRideOtp(
   if (req.tripStage !== "arrived_pickup" && req.tripStage !== "in_progress") {
     return { error: "Please mark that you have arrived at the pickup location first." };
   }
+  if (req.otpLockedUntil && req.otpLockedUntil > now) {
+    const minsLeft = Math.max(1, Math.ceil((req.otpLockedUntil - now) / 60000));
+    return {
+      error: `Too many incorrect OTP attempts. Verification is locked for ${minsLeft} minute(s).`,
+      locked: true,
+    };
+  }
+  if (req.otpLockedUntil && req.otpLockedUntil <= now) {
+    req.otpAttempts = 0;
+    req.otpLockedUntil = undefined;
+  }
+
   const normalized = String(otpInput ?? "").trim();
   if (!/^\d{4}$/.test(normalized) || !req.otp || normalized !== req.otp) {
+    const attempts = (req.otpAttempts ?? 0) + 1;
+    req.otpAttempts = attempts;
+    if (attempts >= MAX_OTP_ATTEMPTS) {
+      req.otpLockedUntil = now + OTP_LOCKOUT_MS;
+      requests.set(requestId, req);
+      saveRequestToDb(req);
+      schedulePersist();
+      return {
+        error: "Too many incorrect OTP attempts. Verification is locked for 10 minutes.",
+        locked: true,
+      };
+    }
+    requests.set(requestId, req);
+    saveRequestToDb(req);
+    schedulePersist();
     return { error: "Incorrect 4-digit OTP. Ask the passenger for their ride OTP." };
   }
+  req.otpAttempts = 0;
+  req.otpLockedUntil = undefined;
   req.tripStage = "in_progress";
-  req.startedAt = Date.now();
+  req.startedAt = now;
   requests.set(requestId, req);
   saveRequestToDb(req);
   schedulePersist();
   return req;
 }
 
-/** Passenger (or the accepting driver) cancels/completes a pending or accepted request; accepted seats are given back. */
+/**
+ * Accepting driver completes a ride at dropoff once `tripStage === "in_progress"`.
+ * Atomically deducts the fare from the passenger's wallet, credits the driver's wallet,
+ * records a `Completed` entry in `trip_history`, and increments `rides_completed` for both users.
+ */
+export function completeRide(
+  requestId: string,
+  driverId: string
+): RideRequest | { error: string } {
+  const req = requests.get(requestId);
+  if (!req) return { error: "Request not found." };
+  if (req.status !== "accepted" || !req.offerId) {
+    return { error: "Ride is not currently active." };
+  }
+  const offer = offers.get(req.offerId);
+  if (!offer || offer.driverId !== driverId) {
+    return { error: "Not authorised." };
+  }
+  if (req.tripStage !== "in_progress") {
+    return { error: "Ride cannot be completed before OTP verification at pickup." };
+  }
+
+  const agreedFareStr = req.agreedFare ?? offer.farePerSeat ?? "50";
+  const numericFare = Math.max(
+    0,
+    Math.round(Number(String(agreedFareStr).replace(/[^\d.]/g, "")) || 0)
+  );
+  const now = Date.now();
+  const tripId = `trip_${now}_${randomInt(1000, 9999)}`;
+  const vehicle = `HopOn ${offer.vehicleType} (${offer.vehicleModel})`;
+  const amount = `₹${agreedFareStr}`;
+
+  const MAX_COUNTERPARTY_COMPLETIONS_24H = 5;
+
+  const db = getDb();
+  const tx = db.transaction(() => {
+    // 1. Double completion guard
+    const existingCompleted = db
+      .prepare("SELECT id FROM trip_history WHERE request_id = ? AND status = 'Completed'")
+      .get(req.id);
+    if (existingCompleted) {
+      throw new Error("This ride has already been completed.");
+    }
+
+    // 2. Anti-collusion / siphon check: limit repeated rides between the same counterparty within 24 hours
+    const recentPairTrips = db
+      .prepare(
+        `SELECT COUNT(*) as count FROM trip_history
+         WHERE passenger_id = ? AND driver_id = ? AND created_at > ? AND status = 'Completed'`
+      )
+      .get(req.passengerId, offer.driverId, now - 24 * 60 * 60 * 1000) as { count: number } | undefined;
+    if (recentPairTrips && recentPairTrips.count >= MAX_COUNTERPARTY_COMPLETIONS_24H) {
+      throw new Error("Daily ride limit between this driver and passenger reached for campus safety.");
+    }
+
+    const pRow = db
+      .prepare("SELECT wallet_balance FROM users WHERE id = ?")
+      .get(req.passengerId) as { wallet_balance: number } | undefined;
+    if (pRow && numericFare > 0) {
+      if (pRow.wallet_balance < numericFare) {
+        throw new Error("Insufficient HopOn Wallet balance for passenger.");
+      }
+      db.prepare("UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?").run(
+        numericFare,
+        req.passengerId
+      );
+      recordWalletLedger(db, {
+        userId: req.passengerId,
+        delta: -numericFare,
+        reason: "ride_fare_debit",
+        actorId: offer.driverId,
+        ref: req.id,
+        balanceAfter: pRow.wallet_balance - numericFare,
+      });
+
+      const dRow = db
+        .prepare("SELECT wallet_balance FROM users WHERE id = ?")
+        .get(offer.driverId) as { wallet_balance: number } | undefined;
+      const dBalanceAfter = (dRow?.wallet_balance ?? 0) + numericFare;
+
+      db.prepare("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?").run(
+        numericFare,
+        offer.driverId
+      );
+      recordWalletLedger(db, {
+        userId: offer.driverId,
+        delta: numericFare,
+        reason: "ride_fare_credit",
+        actorId: req.passengerId,
+        ref: req.id,
+        balanceAfter: dBalanceAfter,
+      });
+    }
+
+    db.prepare(
+      `INSERT INTO trip_history (
+        id, request_id, offer_id, passenger_id, passenger_name,
+        driver_id, driver_name, vehicle, origin, destination, amount, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Completed', ?)`
+    ).run(
+      tripId,
+      req.id,
+      offer.id,
+      req.passengerId,
+      req.passengerName,
+      offer.driverId,
+      offer.driverName,
+      vehicle,
+      req.pickup,
+      req.dropoff,
+      amount,
+      now
+    );
+
+    db.prepare("UPDATE users SET rides_completed = rides_completed + 1 WHERE id = ?").run(
+      req.passengerId
+    );
+    db.prepare("UPDATE users SET rides_completed = rides_completed + 1 WHERE id = ?").run(
+      offer.driverId
+    );
+
+    // Atomic update of ride_requests in SQLite inside the same transaction
+    db.prepare(
+      `UPDATE ride_requests
+       SET status = 'completed', completed_at = ?, responded_at = ?
+       WHERE id = ?`
+    ).run(now, now, req.id);
+
+    // Atomic update of ride_offers seats in SQLite inside the same transaction
+    db.prepare(
+      `UPDATE ride_offers
+       SET seats_left = MIN(seats, seats_left + 1),
+           status = CASE WHEN status = 'full' THEN 'active' ELSE status END
+       WHERE id = ?`
+    ).run(offer.id);
+  });
+
+  try {
+    tx();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not complete ride.";
+    return { error: message };
+  }
+
+  req.status = "completed";
+  req.completedAt = now;
+  req.respondedAt = now;
+  requests.set(requestId, req);
+
+  offer.seatsLeft = Math.min(offer.seats, offer.seatsLeft + 1);
+  if (offer.status === "full") offer.status = "active";
+  offers.set(offer.id, offer);
+
+  schedulePersist();
+  return req;
+}
+
+export function hasActiveAcceptedRide(userId: string): boolean {
+  for (const req of requests.values()) {
+    if (req.status === "accepted") {
+      if (req.passengerId === userId) return true;
+      if (req.offerId) {
+        const offer = offers.get(req.offerId);
+        if (offer && offer.driverId === userId) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Passenger (or the accepting driver) cancels a pending or accepted request; accepted seats are given back. */
 export function cancelRequest(
   requestId: string,
   userId: string
@@ -898,7 +1333,6 @@ export function cancelRequest(
   }
 
   const wasAccepted = req.status === "accepted";
-  const wasInProgress = req.tripStage === "in_progress";
   req.status = "cancelled";
   req.respondedAt = Date.now();
   requests.set(requestId, req);
@@ -911,7 +1345,7 @@ export function cancelRequest(
       offers.set(offer.id, offer);
       saveOfferToDb(offer);
     }
-    recordTripHistory(req, offer, wasInProgress ? "Completed" : "Cancelled");
+    recordTripHistory(req, offer, "Cancelled");
   }
   schedulePersist();
   return req;
@@ -958,7 +1392,8 @@ export function listTripHistoryForUser(userId: string): TripHistoryRecord[] {
       status: r.status,
       createdAt: r.created_at,
     }));
-  } catch {
+  } catch (err) {
+    console.error("listTripHistoryForUser failed:", err);
     return [];
   }
 }
@@ -1052,8 +1487,9 @@ export function sendRideMessage(input: {
       msg.text,
       msg.createdAt
     );
-  } catch {
-    // silent
+  } catch (err) {
+    console.error("sendRideMessage DB insert failed:", err);
+    return { error: "Failed to save message." };
   }
 
   emitRideEvent("message", { requestId: msg.requestId, userId: msg.senderId });
@@ -1095,20 +1531,81 @@ export function listRideMessages(
       text: r.text,
       createdAt: r.created_at,
     }));
-  } catch {
+  } catch (err) {
+    console.error("listRideMessages failed:", err);
     return [];
   }
 }
 
+function maskFirstName(fullName: string): string {
+  const first = fullName.trim().split(/\s+/)[0] || "Student";
+  return first;
+}
+
 /**
- * Public read-only tracking snapshot for `/track/[requestId]` (shared with friends/family).
- * Never exposes the passenger's 4-digit OTP.
+ * Generates (or returns the existing) unguessable share token for a ride request.
+ * Only the passenger of that request is permitted to generate a share token.
  */
-export function getPublicRideTracking(requestId: string): {
-  requestId: string;
+export function createTrackingToken(
+  requestId: string,
+  userId: string
+): { token: string } | { error: string } {
+  const req = requests.get(requestId);
+  if (!req) return { error: "Ride request not found." };
+  if (req.passengerId !== userId) {
+    return { error: "Only the passenger can generate a tracking link." };
+  }
+  if (req.status === "cancelled" || req.status === "rejected") {
+    return { error: "Cannot share a cancelled or rejected ride." };
+  }
+  if (!req.shareToken) {
+    req.shareToken = randomBytes(16).toString("base64url");
+    shareTokenIndex.set(req.shareToken, requestId);
+    requests.set(requestId, req);
+    saveRequestToDb(req);
+    schedulePersist();
+  } else {
+    shareTokenIndex.set(req.shareToken, requestId);
+  }
+  return { token: req.shareToken };
+}
+
+/**
+ * Revokes the public tracking share token for a ride request.
+ * Only the passenger of that request is permitted to revoke it.
+ */
+export function revokeTrackingToken(
+  requestId: string,
+  userId: string
+): { ok: true } | { error: string } {
+  const req = requests.get(requestId);
+  if (!req) return { error: "Ride request not found." };
+  if (req.passengerId !== userId) {
+    return { error: "Only the passenger can revoke a tracking link." };
+  }
+  if (req.shareToken) {
+    shareTokenIndex.delete(req.shareToken);
+  }
+  req.shareToken = undefined;
+  requests.set(requestId, req);
+  saveRequestToDb(req);
+  schedulePersist();
+  return { ok: true };
+}
+
+/**
+ * Public read-only tracking snapshot for `/track/[token]` (shared with friends/family).
+ * Uses the O(1) `shareTokenIndex` Map (not a linear scan or guessable requestId), returns a minimal payload
+ * (passenger first name only, no vehicleNumber, no OTP), remains valid for 10 minutes after completion
+ * so viewers see "Trip Completed", and stops working immediately if cancelled/rejected or older than 24h.
+ */
+export function getPublicRideTracking(
+  token: string,
+  now: number = Date.now()
+): {
   status: RideRequestStatus;
   tripStage: RideTripStage;
-  passengerName: string;
+  passengerFirstName: string;
   pickup: string;
   pickupLat: number;
   pickupLng: number;
@@ -1116,42 +1613,45 @@ export function getPublicRideTracking(requestId: string): {
   dropoffLat: number;
   dropoffLng: number;
   driverName?: string;
-  driverUniversity?: string;
-  driverRating?: number;
   vehicleModel?: string;
-  vehicleNumber?: string;
   vehicleType?: string;
-  farePerSeat?: string;
   driverLiveLocation?: { lat: number; lng: number; updatedAt: number } | null;
   passengerLiveLocation?: { lat: number; lng: number; updatedAt: number } | null;
   createdAt: number;
   arrivedAt?: number;
   startedAt?: number;
+  completedAt?: number;
 } | null {
-  const req = requests.get(requestId);
-  if (!req) return null;
+  const cleanToken = typeof token === "string" ? token.trim() : "";
+  if (!cleanToken) return null;
+
+  const requestId = shareTokenIndex.get(cleanToken);
+  const req = requestId ? requests.get(requestId) : undefined;
+  if (!req || req.shareToken !== cleanToken) return null;
+  if (req.status === "cancelled" || req.status === "rejected") return null;
+  if (req.status === "completed") {
+    const finishedAt = req.completedAt ?? req.respondedAt ?? req.createdAt;
+    if (now - finishedAt > COMPLETED_TRACKING_TTL_MS) return null;
+  }
+  if (now - req.createdAt > TERMINAL_TTL_MS) return null;
+
   const offer = req.offerId ? offers.get(req.offerId) : undefined;
   const driverLoc = offer?.driverId ? driverLiveLocations.get(offer.driverId) : undefined;
   const passengerLoc = driverLiveLocations.get(req.passengerId);
 
   return {
-    requestId: req.id,
     status: req.status,
     tripStage: req.tripStage ?? "en_route_pickup",
-    passengerName: req.passengerName,
+    passengerFirstName: maskFirstName(req.passengerName),
     pickup: req.pickup,
     pickupLat: req.pickupLat,
     pickupLng: req.pickupLng,
     dropoff: req.dropoff,
     dropoffLat: req.dropoffLat,
     dropoffLng: req.dropoffLng,
-    driverName: offer?.driverName,
-    driverUniversity: offer?.driverUniversity,
-    driverRating: offer?.driverRating,
+    driverName: offer ? maskFirstName(offer.driverName) : undefined,
     vehicleModel: offer?.vehicleModel,
-    vehicleNumber: offer?.vehicleNumber,
     vehicleType: offer?.vehicleType,
-    farePerSeat: offer?.farePerSeat,
     driverLiveLocation: driverLoc
       ? { lat: driverLoc.lat, lng: driverLoc.lng, updatedAt: driverLoc.updatedAt }
       : offer
@@ -1163,5 +1663,6 @@ export function getPublicRideTracking(requestId: string): {
     createdAt: req.createdAt,
     arrivedAt: req.arrivedAt,
     startedAt: req.startedAt,
+    completedAt: req.completedAt,
   };
 }

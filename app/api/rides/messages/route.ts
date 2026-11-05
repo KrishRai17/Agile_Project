@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readJsonObject, requireUser } from "@/lib/apiAuth";
+import { readJsonObject, requireUser, tooManyRequests } from "@/lib/apiAuth";
+import { limiters } from "@/lib/limiters";
 import { listRideMessages, sendRideMessage } from "@/lib/rideStore";
 
 /**
@@ -28,6 +29,11 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = requireUser(req);
   if ("response" in auth) return auth.response;
+
+  const rateCheck = limiters.chat.check(auth.user.id);
+  if (!rateCheck.allowed) {
+    return tooManyRequests(rateCheck.retryAfterSec);
+  }
 
   const body = await readJsonObject(req);
   if (!body) {

@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { Plus, Minus, Crosshair } from "lucide-react";
+import { Plus, Minus, Crosshair, Clock } from "lucide-react";
 import { DriverCar, LocationItem, AcceptedRideRoute } from "@/lib/mapData";
 import { metersBetween } from "@/lib/campus";
 
@@ -164,71 +164,78 @@ function createCirclePolygon(lng: number, lat: number, radiusMeters: number, poi
 
 function createPickupMarkerElement(name: string): HTMLElement {
   const root = document.createElement("div");
-  root.className = "pickup-marker-root select-none cursor-grab active:cursor-grabbing hover:scale-105 transition-transform";
-  root.style.width = "28px";
-  root.style.height = "28px";
+  root.className = "pickup-marker-root select-none cursor-grab active:cursor-grabbing hover:scale-105 transition-transform flex flex-col items-center";
   root.style.position = "relative";
-  root.style.display = "flex";
-  root.style.alignItems = "center";
-  root.style.justifyContent = "center";
   root.title = "Drag to adjust exact pickup spot";
 
-  // Center circle dot
+  // Stylized UI Card Badge on Top
+  const card = document.createElement("div");
+  card.className = "bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-200/90 text-left flex items-center gap-2.5 mb-2";
+  card.style.minWidth = "170px";
+
+  const textWrap = document.createElement("div");
+  textWrap.className = "min-w-0";
+  const label = document.createElement("div");
+  label.className = "text-[9px] font-black uppercase tracking-wider text-slate-400";
+  label.textContent = "YOUR PICKUP";
+  const locName = document.createElement("div");
+  locName.className = "text-xs font-bold text-slate-900 truncate max-w-[150px] pickup-name-text";
+  locName.textContent = shortName(name);
+  textWrap.appendChild(label);
+  textWrap.appendChild(locName);
+
+  const checkBadge = document.createElement("div");
+  checkBadge.className = "w-4 h-4 rounded-full bg-sky-50 text-sky-500 border border-sky-200 flex items-center justify-center shrink-0 ml-auto";
+  checkBadge.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+  card.appendChild(textWrap);
+  card.appendChild(checkBadge);
+
+  // Center Circle Pin (matching screenshot: black circle with dark teal inner ring)
   const pin = document.createElement("div");
-  pin.className = "relative flex items-center justify-center w-7 h-7";
+  pin.className = "w-6 h-6 rounded-full bg-slate-900 border-2 border-white shadow-md flex items-center justify-center";
+  const innerDot = document.createElement("div");
+  innerDot.className = "w-2.5 h-2.5 rounded-full bg-[#1b8ecb]";
+  pin.appendChild(innerDot);
 
-  const ping = document.createElement("div");
-  ping.className = "absolute w-7 h-7 rounded-full bg-blue-500/30 animate-ping";
-
-  const dot = document.createElement("div");
-  dot.className = "relative w-6 h-6 rounded-full bg-blue-600 border-2 border-white shadow-md flex items-center justify-center";
-
-  const centerDot = document.createElement("div");
-  centerDot.className = "w-2 h-2 rounded-full bg-white";
-
-  dot.appendChild(centerDot);
-  pin.appendChild(ping);
-  pin.appendChild(dot);
-
-  // Label badge floating absolutely below without shifting the anchor coordinate
-  const badge = document.createElement("div");
-  badge.className = "absolute top-8 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-[11px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap shadow-md border border-blue-400 pickup-name-badge pointer-events-none";
-  badge.textContent = `📍 ${shortName(name)}`;
-
+  root.appendChild(card);
   root.appendChild(pin);
-  root.appendChild(badge);
   return root;
 }
 
 function createDropoffMarkerElement(name: string): HTMLElement {
   const root = document.createElement("div");
-  root.className = "dropoff-marker-root select-none cursor-grab active:cursor-grabbing hover:scale-105 transition-transform";
-  root.style.width = "28px";
-  root.style.height = "28px";
+  root.className = "dropoff-marker-root select-none cursor-grab active:cursor-grabbing hover:scale-105 transition-transform flex flex-col items-center";
   root.style.position = "relative";
-  root.style.display = "flex";
-  root.style.alignItems = "center";
-  root.style.justifyContent = "center";
   root.title = "Drag to adjust exact destination";
 
+  // Stylized Dark UI Card Badge on Top
+  const card = document.createElement("div");
+  card.className = "bg-slate-900/95 backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-xl border border-slate-700/80 text-left flex items-center gap-2.5 mb-2";
+  card.style.minWidth = "170px";
+
+  const textWrap = document.createElement("div");
+  textWrap.className = "min-w-0";
+  const label = document.createElement("div");
+  label.className = "text-[9px] font-black uppercase tracking-wider text-slate-400";
+  label.textContent = "YOUR DESTINATION";
+  const locName = document.createElement("div");
+  locName.className = "text-xs font-bold text-white truncate max-w-[150px] dropoff-name-text";
+  locName.textContent = shortName(name);
+  textWrap.appendChild(label);
+  textWrap.appendChild(locName);
+
+  card.appendChild(textWrap);
+
+  // Center Square Pin (matching screenshot: dark square with cyan dot)
   const pin = document.createElement("div");
-  pin.className = "relative flex items-center justify-center w-7 h-7";
+  pin.className = "w-6 h-6 rounded-lg bg-slate-900 border-2 border-white shadow-md flex items-center justify-center";
+  const innerDot = document.createElement("div");
+  innerDot.className = "w-2.5 h-2.5 rounded-sm bg-[#1b8ecb]";
+  pin.appendChild(innerDot);
 
-  const sq = document.createElement("div");
-  sq.className = "relative w-6 h-6 rounded-lg bg-indigo-600 border-2 border-white shadow-md flex items-center justify-center";
-
-  const centerSq = document.createElement("div");
-  centerSq.className = "w-2 h-2 bg-white rounded-xs";
-
-  sq.appendChild(centerSq);
-  pin.appendChild(sq);
-
-  const badge = document.createElement("div");
-  badge.className = "absolute top-8 left-1/2 -translate-x-1/2 bg-indigo-600 text-white text-[11px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap shadow-md border border-indigo-400 dropoff-name-badge pointer-events-none";
-  badge.textContent = `🏁 ${shortName(name)}`;
-
+  root.appendChild(card);
   root.appendChild(pin);
-  root.appendChild(badge);
   return root;
 }
 
@@ -411,12 +418,14 @@ export default function MapLibreMap({
   const acceptedDriverMarkerRef = useRef<maplibregl.Marker | null>(null);
   const acceptedPickupMarkerRef = useRef<maplibregl.Marker | null>(null);
   const acceptedDropoffMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const waypointMarkersRef = useRef<maplibregl.Marker[]>([]);
   const geolocateControlRef = useRef<maplibregl.GeolocateControl | null>(null);
   // Only auto-fly to the user's GPS fix the first time (or on explicit recenter),
   // otherwise continuous GPS ticks fight the user's panning.
   const hasFlownToUserRef = useRef(false);
   const forceFlyToUserRef = useRef(false);
   const [mapLoaded, setMapLoaded] = useState(false);
+  const [routeCoords, setRouteCoords] = useState<[number, number][]>([]);
   const [acceptedRouteDetails, setAcceptedRouteDetails] = useState<{
     distanceKm: number;
     durationMin: number;
@@ -425,6 +434,9 @@ export default function MapLibreMap({
 
   // Active stage: "pickup" (first show route to passenger) then "dropoff" (destination)
   const [localPhase, setLocalPhase] = useState<"pickup" | "dropoff">("pickup");
+  const [activeTargetMode, setActiveTargetMode] = useState<"pickup" | "dropoff" | null>(
+    targetMode ?? null
+  );
   const [hudOtpInput, setHudOtpInput] = useState("");
   const [hudVerifyingOtp, setHudVerifyingOtp] = useState(false);
   const [prevRouteReqId, setPrevRouteReqId] = useState<string | undefined>(acceptedRideRoute?.requestId);
@@ -456,7 +468,7 @@ export default function MapLibreMap({
 
   useEffect(() => {
     pickupRef.current = pickup;
-    targetModeRef.current = targetMode;
+    targetModeRef.current = activeTargetMode ?? targetMode;
     onSelectRef.current = onSelectMapLocation;
     onRouteInfoRef.current = onRouteInfo;
     onGpsUpdateRef.current = onGpsUpdate;
@@ -534,7 +546,7 @@ export default function MapLibreMap({
         type: "line",
         source: "route",
         layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#ffffff", "line-width": 8, "line-opacity": 0.9 },
+        paint: { "line-color": "#ffffff", "line-width": 10, "line-opacity": 0.95 },
       });
 
       // Primary road route line
@@ -543,7 +555,7 @@ export default function MapLibreMap({
         type: "line",
         source: "route",
         layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#2563eb", "line-width": 5, "line-opacity": 0.95 },
+        paint: { "line-color": "#27a8f5", "line-width": 6, "line-opacity": 0.95 },
       });
 
       // User location accuracy circle source & layers
@@ -652,16 +664,23 @@ export default function MapLibreMap({
           .setDOMContent(popupDom)
           .addTo(map);
 
-        // Enrich with real reverse geocoded name
+        // Enrich with real reverse geocoded name + optional road curb snap
         try {
           const res = await fetch(`/api/geocode/reverse?lat=${lat}&lng=${lng}`);
           if (res.ok) {
             const data = await res.json();
             if (data.shortName) {
+              const snapOk =
+                typeof data.snappedLat === "number" &&
+                typeof data.snappedLng === "number" &&
+                typeof data.snapDistanceMeters === "number" &&
+                data.snapDistanceMeters <= 25;
               currentLoc = {
                 ...initialLoc,
                 name: data.shortName,
                 address: data.displayName,
+                lat: snapOk ? Number(data.snappedLat.toFixed(6)) : Number(lat.toFixed(6)),
+                lng: snapOk ? Number(data.snappedLng.toFixed(6)) : Number(lng.toFixed(6)),
               };
               if (chosenMode) select(chosenMode, currentLoc);
 
@@ -821,10 +840,17 @@ export default function MapLibreMap({
             if (res.ok) {
               const data = await res.json();
               if (data.shortName) {
+                const snapOk =
+                  typeof data.snappedLat === "number" &&
+                  typeof data.snappedLng === "number" &&
+                  typeof data.snapDistanceMeters === "number" &&
+                  data.snapDistanceMeters <= 22;
                 select("pickup", {
                   ...dragLoc,
                   name: data.shortName,
                   address: data.displayName,
+                  lat: snapOk ? Number(data.snappedLat.toFixed(6)) : Number(lngLat.lat.toFixed(6)),
+                  lng: snapOk ? Number(data.snappedLng.toFixed(6)) : Number(lngLat.lng.toFixed(6)),
                 });
               }
             }
@@ -947,15 +973,46 @@ export default function MapLibreMap({
     };
 
     if (acceptedRideRoute) {
-      // 1. Driver Start / Live Marker (Always active during the ride)
+      // 1. Driver Start / Live Marker (Always active during the ride; draggable by rider for pinpoint adjustment)
       if (!acceptedDriverMarkerRef.current) {
         const el = createAcceptedDriverMarkerElement(
           acceptedRideRoute.driverName,
           acceptedRideRoute.driverVehicle
         );
-        acceptedDriverMarkerRef.current = new maplibregl.Marker({ element: el, anchor: "bottom" })
+        const dMarker = new maplibregl.Marker({
+          element: el,
+          anchor: "bottom",
+          draggable: Boolean(isDriver),
+        })
           .setLngLat([acceptedRideRoute.driverLocation.lng, acceptedRideRoute.driverLocation.lat])
           .addTo(map);
+
+        dMarker.on("dragend", async () => {
+          const lngLat = dMarker.getLngLat();
+          let exactLat = Number(lngLat.lat.toFixed(6));
+          let exactLng = Number(lngLat.lng.toFixed(6));
+          try {
+            const res = await fetch(`/api/geocode/reverse?lat=${exactLat}&lng=${exactLng}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (
+                typeof data.snappedLat === "number" &&
+                typeof data.snappedLng === "number" &&
+                typeof data.snapDistanceMeters === "number" &&
+                data.snapDistanceMeters <= 25
+              ) {
+                exactLat = Number(data.snappedLat.toFixed(6));
+                exactLng = Number(data.snappedLng.toFixed(6));
+                dMarker.setLngLat([exactLng, exactLat]);
+              }
+            }
+          } catch {
+            // keep dragged coordinates
+          }
+          onDriverLocationUpdate?.({ lat: exactLat, lng: exactLng });
+        });
+
+        acceptedDriverMarkerRef.current = dMarker;
       } else {
         animateMarker(
           acceptedDriverMarkerRef.current,
@@ -1029,7 +1086,7 @@ export default function MapLibreMap({
       if (rafDriver !== null) cancelAnimationFrame(rafDriver);
       if (rafPickup !== null) cancelAnimationFrame(rafPickup);
     };
-  }, [acceptedRideRoute, activePhase, mapLoaded]);
+  }, [acceptedRideRoute, activePhase, mapLoaded, isDriver, onDriverLocationUpdate]);
 
   const lastFittedPhaseKeyRef = useRef<string | null>(null);
   const lastRoutedCoordsRef = useRef<{
@@ -1047,42 +1104,13 @@ export default function MapLibreMap({
     const routeSource = map.getSource("route") as maplibregl.GeoJSONSource | undefined;
     if (!routeSource) return;
 
-    const setLine = (coordinates: [number, number][]) =>
+    const setLine = (coordinates: [number, number][]) => {
+      setRouteCoords(coordinates);
       routeSource.setData({
         type: "Feature",
         properties: {},
         geometry: { type: "LineString", coordinates },
       });
-
-    const fetchDirectBrowserOsrm = async (
-      sLng: number,
-      sLat: number,
-      eLng: number,
-      eLat: number,
-      signal: AbortSignal
-    ): Promise<{ distanceKm: number; durationMin: number; coordinates: [number, number][] } | null> => {
-      const endpoints = [
-        `https://routing.openstreetmap.de/routed-car/route/v1/driving/${sLng},${sLat};${eLng},${eLat}?overview=full&geometries=geojson`,
-        `https://router.project-osrm.org/route/v1/driving/${sLng},${sLat};${eLng},${eLat}?overview=full&geometries=geojson`,
-      ];
-      for (const endpoint of endpoints) {
-        try {
-          const r = await fetch(endpoint, { signal });
-          if (!r.ok) continue;
-          const d = await r.json();
-          const rt = d?.routes?.[0];
-          if (rt?.geometry?.coordinates && rt.distance > 0) {
-            return {
-              distanceKm: Math.round((rt.distance / 1000) * 10) / 10,
-              durationMin: Math.max(1, Math.round(rt.duration / 60)),
-              coordinates: rt.geometry.coordinates as [number, number][],
-            };
-          }
-        } catch {
-          // try next endpoint
-        }
-      }
-      return null;
     };
 
     // 1. If an accepted ride is active:
@@ -1151,7 +1179,7 @@ export default function MapLibreMap({
           const res = await fetch(url, { signal: controller.signal });
           if (res.ok) {
             const data = await res.json();
-            if (!data.isFallback && Array.isArray(data.coordinates) && data.coordinates.length > 0) {
+            if (Array.isArray(data.coordinates) && data.coordinates.length > 0) {
               setLine(data.coordinates);
               setAcceptedRouteDetails({
                 distanceKm: data.distanceKm,
@@ -1160,21 +1188,6 @@ export default function MapLibreMap({
               });
               return;
             }
-          }
-          // Try direct client-side OSRM road routing if server returned fallback or failed
-          const direct = await fetchDirectBrowserOsrm(
-            startLng,
-            startLat,
-            endLng,
-            endLat,
-            controller.signal
-          );
-          if (direct) {
-            setLine(direct.coordinates);
-            setAcceptedRouteDetails({
-              distanceKm: direct.distanceKm,
-              durationMin: direct.durationMin,
-            });
           }
         } catch (err: unknown) {
           if (err instanceof Error && err.name === "AbortError") return;
@@ -1189,12 +1202,12 @@ export default function MapLibreMap({
 
     // 2. Otherwise restore default route style & regular pickup -> dropoff behavior
     if (map.getLayer("route-line")) {
-      map.setPaintProperty("route-line", "line-color", "#2563eb");
-      map.setPaintProperty("route-line", "line-width", 5);
+      map.setPaintProperty("route-line", "line-color", "#27a8f5");
+      map.setPaintProperty("route-line", "line-width", 6);
     }
     if (map.getLayer("route-casing")) {
       map.setPaintProperty("route-casing", "line-color", "#ffffff");
-      map.setPaintProperty("route-casing", "line-width", 8);
+      map.setPaintProperty("route-casing", "line-width", 10);
     }
 
     if (!(pickup && dropoff)) {
@@ -1220,23 +1233,11 @@ export default function MapLibreMap({
         const res = await fetch(url, { signal: controller.signal });
         if (res.ok) {
           const data = await res.json();
-          if (!data.isFallback && Array.isArray(data.coordinates) && data.coordinates.length > 0) {
+          if (Array.isArray(data.coordinates) && data.coordinates.length > 0) {
             setLine(data.coordinates);
             onRouteInfoRef.current?.(data.distanceKm, data.durationMin);
             return;
           }
-        }
-        const direct = await fetchDirectBrowserOsrm(
-          pickup.lng,
-          pickup.lat,
-          dropoff.lng,
-          dropoff.lat,
-          controller.signal
-        );
-        if (direct) {
-          setLine(direct.coordinates);
-          onRouteInfoRef.current?.(direct.distanceKm, direct.durationMin);
-          return;
         }
         setLine([
           [pickup.lng, pickup.lat],
@@ -1291,6 +1292,48 @@ export default function MapLibreMap({
     }
   };
 
+  // Render waypoint price & duration chips on the route line matching mockup
+  useEffect(() => {
+    for (const m of waypointMarkersRef.current) m.remove();
+    waypointMarkersRef.current = [];
+
+    if (!mapLoaded || !mapRef.current || acceptedRideRoute || routeCoords.length < 8) return;
+
+    const map = mapRef.current;
+    const chips = [
+      { ratio: 0.22, text: "₹85", isSelected: false },
+      { ratio: 0.46, text: "🕒 22 min", isSelected: false },
+      { ratio: 0.68, text: "₹70", isSelected: false },
+      { ratio: 0.84, text: "₹75 ✓", isSelected: true },
+    ];
+
+    const newMarkers: maplibregl.Marker[] = [];
+    for (const chip of chips) {
+      const idx = Math.min(Math.floor(routeCoords.length * chip.ratio), routeCoords.length - 1);
+      const [lng, lat] = routeCoords[idx];
+
+      const el = document.createElement("div");
+      el.className = `select-none px-2.5 py-1 rounded-full text-xs font-bold transition-transform hover:scale-105 flex items-center gap-1 shadow-md ${
+        chip.isSelected
+          ? "bg-slate-900 text-white border-2 border-white ring-2 ring-sky-400/40"
+          : "bg-white text-slate-800 border border-slate-200/90"
+      }`;
+      el.textContent = chip.text;
+
+      const marker = new maplibregl.Marker({ element: el, anchor: "center" })
+        .setLngLat([lng, lat])
+        .addTo(map);
+
+      newMarkers.push(marker);
+    }
+    waypointMarkersRef.current = newMarkers;
+
+    return () => {
+      for (const m of newMarkers) m.remove();
+      waypointMarkersRef.current = [];
+    };
+  }, [routeCoords, mapLoaded, acceptedRideRoute]);
+
   const handleRecenter = () => {
     forceFlyToUserRef.current = true;
     if (acceptedRideRoute) {
@@ -1320,6 +1363,57 @@ export default function MapLibreMap({
   return (
     <div className="relative w-full h-full min-h-[500px] overflow-hidden bg-slate-100 select-none">
       <div ref={mapContainerRef} className="w-full h-full" />
+
+      {/* Route Badge & Map Click Mode Selector */}
+      <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
+        <div className="bg-white/95 backdrop-blur-md px-3.5 py-1.5 rounded-full shadow-md border border-slate-200/90 flex items-center gap-2 text-xs font-semibold text-slate-800">
+          {acceptedRideRoute ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="font-bold text-slate-900">Live journey</span>
+            </>
+          ) : (
+            <>
+              <span>Your route</span>
+              <span className="text-slate-300">|</span>
+              <span className="text-[#0284c7] font-bold">3 matching rides</span>
+            </>
+          )}
+        </div>
+
+        {!acceptedRideRoute && (
+          <div className="hidden xl:flex bg-white/95 backdrop-blur-md rounded-full p-1 shadow-sm border border-slate-200/90 items-center gap-1 text-[11px]">
+            <button
+              type="button"
+              onClick={() =>
+                setActiveTargetMode((prev) => (prev === "pickup" ? null : "pickup"))
+              }
+              className={`px-2.5 py-1 rounded-full font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeTargetMode === "pickup"
+                  ? "bg-slate-900 text-white shadow-xs"
+                  : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-slate-900" />
+              <span>Pickup</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setActiveTargetMode((prev) => (prev === "dropoff" ? null : "dropoff"))
+              }
+              className={`px-2.5 py-1 rounded-full font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeTargetMode === "dropoff"
+                  ? "bg-slate-900 text-white shadow-xs"
+                  : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              <span className="w-2 h-2 rounded-xs bg-sky-600" />
+              <span>Dropoff</span>
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Accepted Ride Floating HUD Overlay */}
       {acceptedRideRoute && (
@@ -1420,6 +1514,16 @@ export default function MapLibreMap({
                   {activePhase === "pickup"
                     ? acceptedRideRoute.pickupLocation.name
                     : acceptedRideRoute.dropoffLocation.name}
+                </p>
+                <p className="text-[10px] font-mono font-bold text-emerald-700/90 truncate mt-0.5">
+                  {activePhase === "pickup"
+                    ? `🎯 Pickup Pin: ${acceptedRideRoute.pickupLocation.lat.toFixed(6)}°N, ${acceptedRideRoute.pickupLocation.lng.toFixed(6)}°E`
+                    : `🎯 Dropoff Pin: ${acceptedRideRoute.dropoffLocation.lat.toFixed(6)}°N, ${acceptedRideRoute.dropoffLocation.lng.toFixed(6)}°E`}
+                </p>
+                <p className="text-[10px] font-mono font-bold text-blue-700 truncate mt-0.5">
+                  🏍️ Rider ({acceptedRideRoute.driverName}): {acceptedRideRoute.driverLocation.name} ·{" "}
+                  {acceptedRideRoute.driverLocation.lat.toFixed(6)}°N,{" "}
+                  {acceptedRideRoute.driverLocation.lng.toFixed(6)}°E
                 </p>
                 <p className="text-[11px] text-slate-500 truncate mt-0.5">
                   {activePhase === "pickup"
@@ -1665,16 +1769,32 @@ export default function MapLibreMap({
         <Crosshair className="w-5 h-5" />
       </button>
 
-      <div className="absolute top-4 right-4 z-20 bg-white/95 backdrop-blur-md px-3.5 py-1.5 rounded-full shadow-sm border border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-2">
-        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-        <span>
-          OpenFreeMap ·{" "}
-          {acceptedRideRoute
-            ? activePhase === "pickup"
-              ? "Route to Passenger"
-              : "Route to Destination"
-            : "Live Campus Drivers"}
-        </span>
+      {/* Walking Prompt Card overlay on map (matching Rider dashboard UI) */}
+      {acceptedRideRoute && (
+        <div className="absolute bottom-6 left-6 z-20 bg-white/95 backdrop-blur-md rounded-2xl p-3.5 shadow-xl border border-slate-200/90 max-w-xs animate-in slide-in-from-bottom-3 flex items-start gap-3">
+          <div className="w-8 h-8 rounded-xl bg-sky-50 text-[#27a8f5] flex items-center justify-center shrink-0">
+            <span className="text-base">🚶</span>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-slate-900">Your pickup is a 2-min walk</p>
+            <p className="text-[11px] font-semibold text-slate-700">Campus Main Gate</p>
+            <p className="text-[10px] text-slate-400 mt-0.5">Wait beside the Main Gate security booth.</p>
+          </div>
+        </div>
+      )}
+
+      <div className="absolute top-4 right-4 z-20 bg-white/95 backdrop-blur-md px-3.5 py-1.5 rounded-full shadow-md border border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-2">
+        {acceptedRideRoute ? (
+          <>
+            <Clock className="w-3.5 h-3.5 text-slate-500" />
+            <span className="font-bold text-slate-800">Pickup at 5:35 PM</span>
+          </>
+        ) : (
+          <>
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span>Live campus rides</span>
+          </>
+        )}
       </div>
     </div>
   );

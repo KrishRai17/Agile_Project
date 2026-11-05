@@ -13,6 +13,7 @@ const {
   respondToRequest,
   markDriverArrived,
   verifyRideOtp,
+  completeRide,
   cancelRequest,
   listRequestsForDriver,
   listRequestsForPassenger,
@@ -24,11 +25,15 @@ const {
   listTripHistoryForUser,
   sendRideMessage,
   listRideMessages,
+  createTrackingToken,
+  revokeTrackingToken,
   getPublicRideTracking,
+  toDriverView,
   subscribeRideEvents,
   pruneStore,
   PENDING_TTL_MS,
   TERMINAL_TTL_MS,
+  COMPLETED_TRACKING_TTL_MS,
   STALE_LOCATION_MS,
 } = store;
 
@@ -397,13 +402,45 @@ test("accepted rides generate a fresh 4-digit OTP and progress through arrive ->
   assert.equal(msgs[0].text, "I'm at Gate 1");
   assert.ok(isError(listRideMessages(req1.id, "stranger")));
 
-  const pub = getPublicRideTracking(req1.id);
+  const tokenResult = createTrackingToken(req1.id, "p_otp_1");
+  assert.ok(!isError(tokenResult));
+  assert.equal(getPublicRideTracking(req1.id), null, "requestId alone cannot track a ride");
+
+  const pub = getPublicRideTracking(tokenResult.token);
   assert.ok(pub);
   assert.equal(pub.tripStage, "in_progress");
+  assert.equal(pub.passengerFirstName, "Passenger");
   assert.ok(!("otp" in pub), "public tracking never exposes OTP");
+  assert.ok(!("vehicleNumber" in pub), "public tracking never exposes vehicle plate");
+  assert.ok(!("passengerName" in pub), "public tracking never exposes full passenger name");
+
+  // Verify toDriverView whitelists allowed fields and strips otp, otpAttempts, otpLockedUntil, shareToken, declinedBy
+  const driverSerialized = toDriverView(getRequest(req1.id));
+  assert.equal(driverSerialized.id, req1.id);
+  assert.equal(driverSerialized.passengerName, "Passenger p_otp_1");
+  assert.ok(driverSerialized.offer);
+  for (const forbidden of ["otp", "otpAttempts", "otpLockedUntil", "shareToken", "declinedBy"]) {
+    assert.ok(!(forbidden in driverSerialized), `toDriverView must not expose ${forbidden}`);
+  }
+
+  // Passenger can revoke the share token, or regenerate it
+  assert.ok(!isError(revokeTrackingToken(req1.id, "p_otp_1")));
+  assert.equal(getPublicRideTracking(tokenResult.token), null, "revoked token stops working");
+  const tokenResult2 = createTrackingToken(req1.id, "p_otp_1");
+  assert.ok(!isError(tokenResult2));
 
   // Complete first ride and book a new ride -> gets a new 4-digit OTP that differs from the previous one
-  cancelRequest(req1.id, "drv_otp");
+  const completed1 = completeRide(req1.id, "drv_otp");
+  assert.ok(!isError(completed1));
+  assert.equal(completed1.status, "completed");
+  const afterComplete = getPublicRideTracking(tokenResult2.token);
+  assert.ok(afterComplete, "tracking stays valid briefly after completion");
+  assert.equal(afterComplete.status, "completed");
+  assert.equal(
+    getPublicRideTracking(tokenResult2.token, completed1.completedAt + COMPLETED_TRACKING_TTL_MS + 1),
+    null,
+    "tracking stops 10 minutes after completion"
+  );
   const history = listTripHistoryForUser("p_otp_1");
   assert.equal(history.length, 1, "completed OTP-verified trip is recorded in trip_history");
   assert.equal(history[0].status, "Completed");
@@ -415,6 +452,202 @@ test("accepted rides generate a fresh 4-digit OTP and progress through arrive ->
   assert.match(accepted2.otp, /^\d{4}$/);
   assert.notEqual(accepted2.otp, accepted1.otp, "new ride gets a new OTP");
   cancelRequest(req2.id, "drv_otp");
+});
+
+test("verifyRideOtp locks verification for 10 minutes after 5 wrong attempts", () => {
+  const offer = createOffer(offerFor("drv_lockout", { seats: 2 }));
+  const req = createRequest(requestFor(offer.id, "p_lockout"));
+  assert.ok(!isError(req));
+  const accepted = respondToRequest(req.id, "drv_lockout", "accept");
+  assert.ok(!isError(accepted));
+  markDriverArrived(req.id, "drv_lockout");
+
+  const wrongCode = accepted.otp === "0000" ? "9999" : "0000";
+  const t0 = Date.now();
+
+  for (let i = 1; i <= 4; i++) {
+    const attempt = verifyRideOtp(req.id, "drv_lockout", wrongCode, t0);
+    assert.ok(isError(attempt));
+    assert.ok(!attempt.locked, `attempt ${i} should not lock yet`);
+  }
+
+  // 5th wrong try triggers the 10-minute lockout
+  const fifth = verifyRideOtp(req.id, "drv_lockout", wrongCode, t0);
+  assert.ok(isError(fifth));
+  assert.equal(fifth.locked, true);
+  assert.match(fifth.error, /locked for 10 minutes/i);
+
+  // Even the RIGHT OTP is rejected while locked
+  const whileLocked = verifyRideOtp(req.id, "drv_lockout", accepted.otp, t0 + 5 * 60 * 1000);
+  assert.ok(isError(whileLocked));
+  assert.equal(whileLocked.locked, true);
+
+  // After 10 minutes + 1s, the lock expires and the right OTP succeeds
+  const afterExpiry = verifyRideOtp(req.id, "drv_lockout", accepted.otp, t0 + 10 * 60 * 1000 + 1000);
+  assert.ok(!isError(afterExpiry));
+  assert.equal(afterExpiry.tripStage, "in_progress");
+  cancelRequest(req.id, "drv_lockout");
+});
+
+test("a driver cannot accept a second request while they already have an unfinished accepted ride", () => {
+  const offer = createOffer(offerFor("drv_single_active", { seats: 3 }));
+  const r1 = createRequest(requestFor(offer.id, "p_single_1"));
+  const r2 = createRequest(requestFor(offer.id, "p_single_2"));
+  assert.ok(!isError(r1) && !isError(r2));
+
+  const firstAccept = respondToRequest(r1.id, "drv_single_active", "accept");
+  assert.ok(!isError(firstAccept));
+
+  const secondAccept = respondToRequest(r2.id, "drv_single_active", "accept");
+  assert.ok(isError(secondAccept));
+  assert.match(secondAccept.error, /already have an active accepted ride/i);
+
+  // Once the first ride is finished/cancelled, the driver can accept the next request
+  cancelRequest(r1.id, "drv_single_active");
+  const retrySecond = respondToRequest(r2.id, "drv_single_active", "accept");
+  assert.ok(!isError(retrySecond));
+  cancelRequest(r2.id, "drv_single_active");
+});
+
+test("tracking tokens enforce passenger-only auth and 24-hour expiry", () => {
+  const offer = createOffer(offerFor("drv_track_auth", { seats: 1 }));
+  const req = createRequest(requestFor(offer.id, "p_track_auth"));
+  assert.ok(!isError(req));
+  respondToRequest(req.id, "drv_track_auth", "accept");
+
+  // Driver or stranger cannot generate or revoke the passenger's tracking token
+  assert.ok(isError(createTrackingToken(req.id, "drv_track_auth")));
+  assert.ok(isError(createTrackingToken(req.id, "stranger")));
+
+  const tok = createTrackingToken(req.id, "p_track_auth");
+  assert.ok(!isError(tok));
+  assert.ok(isError(revokeTrackingToken(req.id, "drv_track_auth")));
+
+  // Valid now, but expires after 24 hours
+  assert.ok(getPublicRideTracking(tok.token, req.createdAt + 1000));
+  assert.equal(
+    getPublicRideTracking(tok.token, req.createdAt + TERMINAL_TTL_MS + 1000),
+    null,
+    "tracking link expires after 24h"
+  );
+  cancelRequest(req.id, "drv_track_auth");
+});
+
+test("completeRide atomically transfers fare between passenger and driver wallets and cancellation after start is Cancelled", async () => {
+  const accounts = await loadTs("lib/accounts.ts");
+  const pUser = accounts.registerUser({
+    name: "Wallet Passenger",
+    email: "wallet.passenger@kju.edu",
+    password: "password123",
+    role: "passenger",
+  });
+  const dUser = accounts.registerUser({
+    name: "Wallet Driver",
+    email: "wallet.driver@kju.edu",
+    password: "password123",
+    role: "driver",
+    vehicleType: "Car",
+    vehicleModel: "Honda City",
+    vehicleNumber: "KA 01 AB 1234",
+  });
+  assert.ok(!isError(pUser) && !isError(dUser));
+  assert.equal(pUser.studentIdVerified, false, "newly registered user starts unverified");
+  assert.equal(dUser.studentIdVerified, false, "newly registered driver starts unverified");
+  assert.equal(
+    dUser.role,
+    "passenger",
+    "unverified user cannot act as a driver until email is verified"
+  );
+  assert.deepEqual(
+    listRequestsForDriver(dUser.id),
+    [],
+    "unverified driver cannot see open ride requests"
+  );
+  assert.throws(
+    () => createOffer(offerFor(dUser.id, { farePerSeat: "60", seats: 2 })),
+    /verify your university email/i,
+    "unverified driver cannot post offers"
+  );
+
+  // Verify driver and passenger email ownership to unlock verified state and grant starting wallet bonus
+  const pTok = accounts.createEmailVerificationToken(pUser.id);
+  assert.ok(!isError(pTok));
+  accounts.verifyEmailToken(pTok.token);
+
+  const verifyTok = accounts.createEmailVerificationToken(dUser.id);
+  assert.ok(!isError(verifyTok));
+  const verifiedRes = accounts.verifyEmailToken(verifyTok.token);
+  assert.ok(!isError(verifiedRes));
+  assert.equal(verifiedRes.user.studentIdVerified, true);
+  assert.equal(verifiedRes.user.role, "driver");
+
+  const offer = createOffer(offerFor(dUser.id, { farePerSeat: "60", seats: 2 }));
+  const req = createRequest(requestFor(offer.id, pUser.id));
+  assert.ok(!isError(req));
+
+  // If passenger's wallet balance is below the offer fare at accept time, respondToRequest rejects the accept
+  accounts.adjustWalletBalance(pUser.id, -220); // balance becomes 30 (< 60)
+  const rejectedLowBalance = respondToRequest(req.id, dUser.id, "accept");
+  assert.ok(isError(rejectedLowBalance), "accept must fail when passenger balance < fare");
+  assert.match(rejectedLowBalance.error, /insufficient HopOn Wallet balance/i);
+  assert.equal(getRequest(req.id).status, "pending");
+
+  // Restore passenger wallet balance to 250 and accept
+  accounts.adjustWalletBalance(pUser.id, 220);
+  const accepted = respondToRequest(req.id, dUser.id, "accept");
+  assert.ok(!isError(accepted));
+  assert.equal(accepted.agreedFare, "60", "agreedFare stored on request when accepted");
+  assert.equal(toDriverView(accepted).agreedFare, "60");
+
+  markDriverArrived(req.id, dUser.id);
+  const currentReq = getRequest(req.id);
+  verifyRideOtp(req.id, dUser.id, currentReq.otp);
+
+  const shareTok = createTrackingToken(req.id, pUser.id);
+  assert.ok(!isError(shareTok));
+
+  const completed = completeRide(req.id, dUser.id);
+  assert.ok(!isError(completed));
+  assert.equal(completed.status, "completed", "completeRide sets status to completed, not cancelled");
+  assert.ok(completed.completedAt, "completedAt timestamp is set");
+
+  // Tracking link stays valid for 10 minutes after completion showing status === 'completed', then expires
+  const trackDuring10Min = getPublicRideTracking(
+    shareTok.token,
+    completed.completedAt + 5 * 60 * 1000
+  );
+  assert.ok(trackDuring10Min, "tracking link valid within 10 minutes after completion");
+  assert.equal(trackDuring10Min.status, "completed");
+
+  const trackAfter10Min = getPublicRideTracking(
+    shareTok.token,
+    completed.completedAt + COMPLETED_TRACKING_TTL_MS + 1000
+  );
+  assert.equal(
+    trackAfter10Min,
+    null,
+    "tracking link expires 10 minutes after completion"
+  );
+
+  const pAfter = accounts.getUserById(pUser.id);
+  const dAfter = accounts.getUserById(dUser.id);
+  assert.equal(pAfter.walletBalance, 250 - 60, "fare deducted from passenger wallet");
+  assert.equal(dAfter.walletBalance, 250 + 60, "fare credited to driver wallet");
+  assert.equal(pAfter.ridesCompleted, 1);
+  assert.equal(dAfter.ridesCompleted, 1);
+
+  // Now test that cancelling even after OTP verification (in_progress) records 'Cancelled', not 'Completed'
+  const reqCancel = createRequest(requestFor(offer.id, pUser.id));
+  assert.ok(!isError(reqCancel));
+  respondToRequest(reqCancel.id, dUser.id, "accept");
+  markDriverArrived(reqCancel.id, dUser.id);
+  verifyRideOtp(reqCancel.id, dUser.id, getRequest(reqCancel.id).otp);
+  cancelRequest(reqCancel.id, dUser.id);
+
+  const history = listTripHistoryForUser(pUser.id);
+  const cancelledEntry = history.find((h) => h.requestId === reqCancel.id);
+  assert.ok(cancelledEntry);
+  assert.equal(cancelledEntry.status, "Cancelled", "cancellation after start must not count as Completed");
 });
 
 // Keep this test last: it fast-forwards time and deletes old data.

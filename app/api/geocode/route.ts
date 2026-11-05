@@ -29,6 +29,62 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 // Bounded in-memory cache for recent geocoding queries (expired entries are evicted automatically)
 const cache = createTtlCache<LocationItem[]>(500);
 
+async function searchPhoton(q: string): Promise<LocationItem[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3200);
+  try {
+    const params = new URLSearchParams({
+      q: q.toLowerCase().includes("bengaluru") || q.toLowerCase().includes("bangalore") ? q : `${q}, Bengaluru`,
+      lat: "13.0583",
+      lon: "77.6426",
+      limit: "6",
+      lang: "en",
+    });
+    const res = await fetch(`https://photon.komoot.io/api/?${params.toString()}`, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "HopOn-Campus-Rides/1.0 (student@hopon.demo; Kristu Jayanti University Pilot)",
+      },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const features = Array.isArray(data?.features) ? data.features : [];
+    return features
+      .map((f: { properties?: Record<string, unknown>; geometry?: { coordinates?: number[] } }, idx: number) => {
+        const coords = f.geometry?.coordinates;
+        const props = f.properties || {};
+        if (!Array.isArray(coords) || coords.length < 2) return null;
+        const lng = Number(coords[0]);
+        const lat = Number(coords[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        const name = String(props.name || props.street || props.district || q).trim();
+        const address = [
+          props.name,
+          props.housenumber ? `#${props.housenumber}` : undefined,
+          props.street,
+          props.district || props.suburb,
+          props.city || "Bengaluru",
+          props.postcode,
+        ]
+          .filter(Boolean)
+          .join(", ");
+        return {
+          id: `pho_${props.osm_id ?? idx}_${lat.toFixed(5)}`,
+          name,
+          address: address || `${name}, Bengaluru`,
+          lat,
+          lng,
+          category: "landmark" as const,
+        };
+      })
+      .filter((x: LocationItem | null): x is LocationItem => x !== null);
+  } catch {
+    clearTimeout(timeout);
+    return [];
+  }
+}
+
 export async function GET(req: NextRequest) {
   const auth = requireUser(req);
   if ("response" in auth) return auth.response;
@@ -54,13 +110,20 @@ export async function GET(req: NextRequest) {
 
   // Nominatim's usage policy allows roughly one request per second, so cap upstream calls globally.
   const upstream = limiters.nominatim.check("nominatim");
-  if (!upstream.allowed) return tooManyRequests(upstream.retryAfterSec, { results: [] });
+  if (!upstream.allowed) {
+    const photonFallback = await searchPhoton(q);
+    if (photonFallback.length > 0) {
+      cache.set(cacheKey, photonFallback, CACHE_TTL_MS);
+    }
+    return NextResponse.json({ results: photonFallback });
+  }
 
   try {
     const params = new URLSearchParams({
       q,
       format: "json",
       addressdetails: "1",
+      extratags: "1",
       limit: "6",
       countrycodes: "in",
       viewbox: "77.3,12.6,78.0,13.4",
@@ -81,7 +144,8 @@ export async function GET(req: NextRequest) {
     clearTimeout(timeout);
 
     if (!res.ok) {
-      return NextResponse.json({ results: [] });
+      const photonFallback = await searchPhoton(q);
+      return NextResponse.json({ results: photonFallback });
     }
 
     const rawData: NominatimRawItem[] = await res.json();
@@ -102,7 +166,10 @@ export async function GET(req: NextRequest) {
       const primaryPoi = item.display_name ? item.display_name.split(",")[0].trim() : "";
       const secondaryArea = parts.slice(0, 2).join(", ");
 
-      const name = primaryPoi || secondaryArea || item.display_name;
+      const name =
+        primaryPoi && secondaryArea && !primaryPoi.toLowerCase().includes(secondaryArea.toLowerCase())
+          ? `${primaryPoi}, ${secondaryArea}`
+          : primaryPoi || secondaryArea || item.display_name;
 
       return {
         id: `nom_${item.place_id}`,
@@ -114,11 +181,20 @@ export async function GET(req: NextRequest) {
       };
     });
 
+    if (mapped.length === 0) {
+      const photonResults = await searchPhoton(q);
+      if (photonResults.length > 0) {
+        cache.set(cacheKey, photonResults, CACHE_TTL_MS);
+        return NextResponse.json({ results: photonResults });
+      }
+    }
+
     cache.set(cacheKey, mapped, CACHE_TTL_MS);
 
     return NextResponse.json({ results: mapped });
   } catch (error) {
     console.error("Geocoding error:", error);
-    return NextResponse.json({ results: [] });
+    const photonFallback = await searchPhoton(q);
+    return NextResponse.json({ results: photonFallback });
   }
 }

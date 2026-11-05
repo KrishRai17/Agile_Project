@@ -15,7 +15,6 @@ import {
 import type { RideMessage } from "@/lib/rideStore";
 import { useToast } from "@/components/ToastContext";
 import { playNotificationChime } from "@/lib/notifications";
-import { getStoredUser, setStoredUser } from "@/lib/auth";
 
 interface RideCompanionBarProps {
   requestId: string;
@@ -51,8 +50,6 @@ export default function RideCompanionBar({
   const [messages, setMessages] = useState<RideMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [walletPaid, setWalletPaid] = useState(false);
-  const [payingWallet, setPayingWallet] = useState(false);
 
   const numericFare = Math.max(10, Number(String(fare).replace(/[^\d.]/g, "")) || 50);
 
@@ -113,48 +110,38 @@ export default function RideCompanionBar({
   };
 
   const handleShareTrip = async () => {
-    const shareUrl = `${window.location.origin}/track/${requestId}`;
-    try {
-      await navigator.clipboard.writeText(shareUrl);
+    if (userRole !== "passenger") {
       showToast(
-        "Live Tracking Link Copied! 🔗",
-        `Share ${shareUrl} with friends or family to track this ride live.`,
-        "success"
+        "Passenger Feature",
+        "Only the passenger can generate or revoke a public tracking link.",
+        "info"
       );
-    } catch {
-      showToast("Live Trip URL", shareUrl, "info");
+      return;
     }
-  };
-
-  const handlePayWithWallet = async () => {
-    if (walletPaid || payingWallet) return;
-    setPayingWallet(true);
     try {
-      const res = await fetch("/api/wallet", {
+      const res = await fetch("/api/rides/track", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "pay", amount: numericFare }),
+        body: JSON.stringify({ requestId }),
       });
       const data = await res.json();
-      if (res.ok && data.user) {
-        setWalletPaid(true);
-        const stored = getStoredUser();
-        if (stored) {
-          setStoredUser({ ...stored, walletBalance: data.walletBalance });
-        }
-        playNotificationChime("success");
+      if (!res.ok || !data.token) {
+        showToast("Share Error", data.error || "Could not create tracking link.", "error");
+        return;
+      }
+      const shareUrl = `${window.location.origin}/track/${data.token}`;
+      try {
+        await navigator.clipboard.writeText(shareUrl);
         showToast(
-          "Paid via HopOn Wallet ✅",
-          `₹${numericFare} paid. Remaining wallet balance: ₹${data.walletBalance}`,
+          "Live Tracking Link Copied! 🔗",
+          `Share ${shareUrl} with friends or family to track this ride live.`,
           "success"
         );
-      } else {
-        showToast("Wallet Payment Failed", data.error || "Insufficient balance.", "error");
+      } catch {
+        showToast("Live Trip URL", shareUrl, "info");
       }
     } catch {
-      showToast("Network Error", "Could not process wallet payment.", "error");
-    } finally {
-      setPayingWallet(false);
+      showToast("Network Error", "Could not generate tracking link.", "error");
     }
   };
 
@@ -196,7 +183,7 @@ export default function RideCompanionBar({
           }`}
         >
           <QrCode className="w-3.5 h-3.5 shrink-0" />
-          <span>{walletPaid ? "Paid ✓" : `₹${numericFare} UPI`}</span>
+          <span>₹{numericFare} Fare</span>
         </button>
 
         <button
@@ -351,26 +338,13 @@ export default function RideCompanionBar({
               <p className="text-[11px] text-slate-500 truncate">
                 UPI ID: <span className="font-mono font-semibold text-slate-700">hopon.kju@okaxis</span>
               </p>
-              {userRole === "passenger" && (
-                <button
-                  type="button"
-                  disabled={walletPaid || payingWallet}
-                  onClick={() => void handlePayWithWallet()}
-                  className="mt-1 w-full py-1.5 px-3 rounded-lg bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-60 text-white text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  {walletPaid ? (
-                    <>
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Paid via HopOn Wallet</span>
-                    </>
-                  ) : (
-                    <>
-                      <Wallet className="w-3.5 h-3.5" />
-                      <span>{payingWallet ? "Paying…" : `Pay ₹${numericFare} with HopOn Wallet`}</span>
-                    </>
-                  )}
-                </button>
-              )}
+              <div className="mt-1 py-1.5 px-2.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-800 text-[10px] font-semibold flex items-center gap-1.5">
+                <Wallet className="w-3.5 h-3.5 shrink-0 text-indigo-600" />
+                <span>
+                  <CheckCircle2 className="w-3 h-3 inline mr-1 text-emerald-600" />
+                  ₹{numericFare} auto-settles via HopOn Wallet on ride completion
+                </span>
+              </div>
             </div>
           </div>
         </div>

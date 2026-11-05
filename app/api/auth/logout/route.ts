@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE } from "@/lib/session";
+import { getSessionUser } from "@/lib/apiAuth";
+import { revokeUserSessions } from "@/lib/accounts";
 
 // The session cookie is httpOnly, so only the server can remove it. The client calls this on sign-out.
 export async function POST(req: NextRequest) {
+  const user = getSessionUser(req);
+  if (user) {
+    revokeUserSessions(user.id);
+  }
+
   const isHttps =
     req.nextUrl.protocol === "https:" ||
     req.headers.get("x-forwarded-proto")?.split(",")[0].trim() === "https";

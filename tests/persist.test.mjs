@@ -1,6 +1,6 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadTs } from "./support/load-ts.mjs";
@@ -8,6 +8,7 @@ import { loadTs } from "./support/load-ts.mjs";
 // Persistence is opt-in via HOPON_PERSIST_FILE, which the store reads when it is first loaded.
 const dir = mkdtempSync(join(tmpdir(), "hopon-persist-"));
 const file = join(dir, "nested", "store.json");
+mkdirSync(join(dir, "nested"), { recursive: true });
 process.env.HOPON_PERSIST_FILE = file;
 
 after(() => {

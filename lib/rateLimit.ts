@@ -17,6 +17,20 @@ export interface RateLimiter {
   size(): number;
 }
 
+export interface BackoffResult {
+  allowed: boolean;
+  failures: number;
+  delayMs: number;
+  retryAfterSec: number;
+}
+
+export interface ExponentialBackoffLimiter {
+  check(key: string, nowMs?: number, recordAttempt?: boolean): BackoffResult;
+  recordFailure(key: string, nowMs?: number): BackoffResult;
+  reset(key: string): void;
+  size(): number;
+}
+
 export function createRateLimiter(options: {
   limit: number;
   windowMs: number;
@@ -67,14 +81,150 @@ export function createRateLimiter(options: {
 }
 
 /**
- * Best-effort client IP. X-Forwarded-For is only trustworthy behind a proxy you control
- * (Vercel, nginx, ...); otherwise a client can spoof it, so never rely on this alone.
+ * Per-key exponential backoff limiter that slows down repeated attempts (e.g. 1s, 2s, 4s, 8s...)
+ * after `freeAttempts` instead of hard-locking an account for 15 minutes.
+ */
+export function createExponentialBackoffLimiter(options?: {
+  freeAttempts?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  ttlMs?: number;
+  maxKeys?: number;
+}): ExponentialBackoffLimiter {
+  const freeAttempts = options?.freeAttempts ?? 3;
+  const baseDelayMs = options?.baseDelayMs ?? 1000;
+  const maxDelayMs = options?.maxDelayMs ?? 30_000;
+  const ttlMs = options?.ttlMs ?? 15 * 60 * 1000;
+  const maxKeys = options?.maxKeys ?? 5000;
+  const entries = new Map<string, { failures: number; nextAllowedAt: number; expiresAt: number }>();
+
+  function makeRoom(now: number): void {
+    for (const [k, v] of entries) {
+      if (v.expiresAt <= now) entries.delete(k);
+    }
+    while (entries.size >= maxKeys) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      entries.delete(oldest);
+    }
+  }
+
+  return {
+    check(key, now = Date.now(), recordAttempt = true) {
+      const existing = entries.get(key);
+      if (existing && existing.expiresAt > now) {
+        if (now < existing.nextAllowedAt) {
+          const waitMs = existing.nextAllowedAt - now;
+          return {
+            allowed: false,
+            failures: existing.failures,
+            delayMs: waitMs,
+            retryAfterSec: Math.max(1, Math.ceil(waitMs / 1000)),
+          };
+        }
+        if (!recordAttempt) {
+          return {
+            allowed: true,
+            failures: existing.failures,
+            delayMs: 0,
+            retryAfterSec: 0,
+          };
+        }
+        const failures = existing.failures + 1;
+        const exponent = Math.max(0, failures - freeAttempts);
+        const delayMs =
+          failures >= freeAttempts ? Math.min(maxDelayMs, baseDelayMs * 2 ** exponent) : 0;
+        entries.set(key, {
+          failures,
+          nextAllowedAt: now + delayMs,
+          expiresAt: now + ttlMs,
+        });
+        return {
+          allowed: true,
+          failures,
+          delayMs,
+          retryAfterSec: 0,
+        };
+      }
+
+      if (!recordAttempt) {
+        return {
+          allowed: true,
+          failures: 0,
+          delayMs: 0,
+          retryAfterSec: 0,
+        };
+      }
+
+      if (entries.size >= maxKeys) makeRoom(now);
+      const failures = 1;
+      const delayMs = failures >= freeAttempts ? baseDelayMs : 0;
+      entries.set(key, {
+        failures,
+        nextAllowedAt: now + delayMs,
+        expiresAt: now + ttlMs,
+      });
+      return {
+        allowed: true,
+        failures,
+        delayMs,
+        retryAfterSec: 0,
+      };
+    },
+    recordFailure(key, now = Date.now()) {
+      return this.check(key, now, true);
+    },
+    reset(key) {
+      entries.delete(key);
+    },
+    size() {
+      return entries.size;
+    },
+  };
+}
+
+const globalForProxyWarn = globalThis as unknown as { __hoponProxyWarned?: boolean };
+
+/**
+ * Logs a one-time startup warning when running in production without `TRUST_PROXY=true`.
+ */
+export function warnIfUntrustedProxyInProduction(): boolean {
+  if (process.env.NODE_ENV === "production" && process.env.TRUST_PROXY !== "true") {
+    if (!globalForProxyWarn.__hoponProxyWarned) {
+      globalForProxyWarn.__hoponProxyWarned = true;
+      console.warn(
+        "[HopOn] Warning: NODE_ENV is 'production' but TRUST_PROXY is not 'true'. Forwarded IP headers will be ignored."
+      );
+    }
+    return true;
+  }
+  return false;
+}
+
+warnIfUntrustedProxyInProduction();
+
+/**
+ * Best-effort client IP. X-Forwarded-For / X-Real-IP are only trusted when `TRUST_PROXY=true`
+ * (behind a reverse proxy you control such as Vercel or nginx); otherwise a client can spoof them.
  */
 export function clientIp(headers: { get(name: string): string | null }): string {
-  const forwarded = headers.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded.split(",")[0].trim();
-    if (first) return first;
+  warnIfUntrustedProxyInProduction();
+  if (process.env.TRUST_PROXY === "true") {
+    const forwarded = headers.get("x-forwarded-for");
+    if (forwarded) {
+      const parts = forwarded
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const parsedHops = parseInt(process.env.TRUSTED_PROXY_HOPS || "1", 10);
+      const hops = Number.isFinite(parsedHops) && parsedHops >= 1 ? parsedHops : 1;
+      if (parts.length >= hops) {
+        const targetIp = parts[parts.length - hops];
+        if (targetIp) return targetIp;
+      }
+    }
+    const realIp = headers.get("x-real-ip")?.trim();
+    if (realIp) return realIp;
   }
-  return headers.get("x-real-ip")?.trim() || "unknown";
+  return "unknown";
 }

@@ -11,6 +11,7 @@
  *  - `ride_messages`    (in-ride real-time chat messages & quick replies)
  *  - `ride_ratings`     (2-way post-ride 1–5 star ratings and feedback tags)
  */
+import { randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -38,15 +39,18 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   university TEXT NOT NULL DEFAULT 'Kristu Jayanti University',
-  student_id_verified INTEGER NOT NULL DEFAULT 1,
+  student_id_verified INTEGER NOT NULL DEFAULT 0,
   student_roll_number TEXT,
-  wallet_balance INTEGER NOT NULL DEFAULT 250,
+  wallet_balance INTEGER NOT NULL DEFAULT 0,
   rating REAL NOT NULL DEFAULT 5.0,
   rides_completed INTEGER NOT NULL DEFAULT 0,
   role TEXT NOT NULL CHECK(role IN ('passenger', 'driver')),
   vehicle_model TEXT,
   vehicle_number TEXT,
   vehicle_type TEXT,
+  email_verification_hash TEXT,
+  email_verification_expires_at INTEGER,
+  session_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
 );
 
@@ -92,12 +96,17 @@ CREATE TABLE IF NOT EXISTS ride_requests (
   dropoff TEXT NOT NULL,
   dropoff_lat REAL NOT NULL,
   dropoff_lng REAL NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'rejected', 'cancelled')),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed')),
   note TEXT,
+  agreed_fare TEXT,
   otp TEXT,
+  otp_attempts INTEGER NOT NULL DEFAULT 0,
+  otp_locked_until INTEGER,
+  share_token TEXT,
   trip_stage TEXT CHECK(trip_stage IN ('en_route_pickup', 'arrived_pickup', 'in_progress')),
   arrived_at INTEGER,
   started_at INTEGER,
+  completed_at INTEGER,
   created_at INTEGER NOT NULL,
   responded_at INTEGER
 );
@@ -159,6 +168,31 @@ CREATE TABLE IF NOT EXISTS ride_ratings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ride_ratings_target ON ride_ratings(target_user_id);
+
+CREATE TABLE IF NOT EXISTS verification_audit (
+  id TEXT PRIMARY KEY,
+  student_email TEXT,
+  roll_number TEXT,
+  method TEXT NOT NULL,
+  ip TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_audit_email ON verification_audit(student_email);
+
+CREATE TABLE IF NOT EXISTS wallet_ledger (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  delta INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  actor_id TEXT,
+  ref TEXT,
+  balance_after INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_user ON wallet_ledger(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_created ON wallet_ledger(created_at);
 `;
 
 interface GlobalDbHolder {
@@ -177,6 +211,119 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
   if (!names.has("wallet_balance")) {
     db.exec("ALTER TABLE users ADD COLUMN wallet_balance INTEGER NOT NULL DEFAULT 250");
   }
+  if (!names.has("email_verification_hash")) {
+    db.exec("ALTER TABLE users ADD COLUMN email_verification_hash TEXT");
+  }
+  if (!names.has("email_verification_expires_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN email_verification_expires_at INTEGER");
+  }
+  if (!names.has("session_version")) {
+    db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1");
+  }
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_trip_history_completed_request ON trip_history(request_id) WHERE status = 'Completed'"
+  );
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wallet_ledger (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      delta INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      actor_id TEXT,
+      ref TEXT,
+      balance_after INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_wallet_ledger_user ON wallet_ledger(user_id);
+    CREATE INDEX IF NOT EXISTS idx_wallet_ledger_created ON wallet_ledger(created_at);
+  `);
+
+  const reqCols = db.prepare("PRAGMA table_info(ride_requests)").all() as Array<{ name: string }>;
+  const reqNames = new Set(reqCols.map((c) => c.name));
+  if (!reqNames.has("otp_attempts")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN otp_attempts INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!reqNames.has("otp_locked_until")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN otp_locked_until INTEGER");
+  }
+  if (!reqNames.has("share_token")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN share_token TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_ride_requests_share_token ON ride_requests(share_token)");
+  }
+  if (!reqNames.has("agreed_fare")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN agreed_fare TEXT");
+  }
+  if (!reqNames.has("completed_at")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN completed_at INTEGER");
+  }
+
+  const tableSqlRow = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ride_requests'")
+    .get() as { sql?: string } | undefined;
+  if (tableSqlRow?.sql && !tableSqlRow.sql.includes("'completed'")) {
+    db.exec(`
+      BEGIN TRANSACTION;
+      CREATE TABLE ride_requests_new (
+        id TEXT PRIMARY KEY,
+        offer_id TEXT,
+        declined_by TEXT NOT NULL DEFAULT '[]',
+        passenger_id TEXT NOT NULL,
+        passenger_name TEXT NOT NULL,
+        passenger_rating REAL NOT NULL,
+        pickup TEXT NOT NULL,
+        pickup_lat REAL NOT NULL,
+        pickup_lng REAL NOT NULL,
+        dropoff TEXT NOT NULL,
+        dropoff_lat REAL NOT NULL,
+        dropoff_lng REAL NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'rejected', 'cancelled', 'completed')),
+        note TEXT,
+        agreed_fare TEXT,
+        otp TEXT,
+        otp_attempts INTEGER NOT NULL DEFAULT 0,
+        otp_locked_until INTEGER,
+        share_token TEXT,
+        trip_stage TEXT CHECK(trip_stage IN ('en_route_pickup', 'arrived_pickup', 'in_progress')),
+        arrived_at INTEGER,
+        started_at INTEGER,
+        completed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        responded_at INTEGER
+      );
+      INSERT INTO ride_requests_new (
+        id, offer_id, declined_by, passenger_id, passenger_name, passenger_rating,
+        pickup, pickup_lat, pickup_lng, dropoff, dropoff_lat, dropoff_lng,
+        status, note, agreed_fare, otp, otp_attempts, otp_locked_until, share_token,
+        trip_stage, arrived_at, started_at, completed_at, created_at, responded_at
+      )
+      SELECT
+        id, offer_id, declined_by, passenger_id, passenger_name, passenger_rating,
+        pickup, pickup_lat, pickup_lng, dropoff, dropoff_lat, dropoff_lng,
+        status, note, agreed_fare, otp, otp_attempts, otp_locked_until, share_token,
+        trip_stage, arrived_at, started_at, completed_at, created_at, responded_at
+      FROM ride_requests;
+      DROP TABLE ride_requests;
+      ALTER TABLE ride_requests_new RENAME TO ride_requests;
+      CREATE INDEX IF NOT EXISTS idx_ride_requests_passenger ON ride_requests(passenger_id);
+      CREATE INDEX IF NOT EXISTS idx_ride_requests_offer ON ride_requests(offer_id);
+      CREATE INDEX IF NOT EXISTS idx_ride_requests_status ON ride_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_ride_requests_share_token ON ride_requests(share_token);
+      COMMIT;
+    `);
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_ride_requests_share_token ON ride_requests(share_token)");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS verification_audit (
+      id TEXT PRIMARY KEY,
+      student_email TEXT,
+      roll_number TEXT,
+      method TEXT NOT NULL,
+      ip TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_verification_audit_email ON verification_audit(student_email);
+  `);
 }
 
 export function getDb(): BetterSqlite3.Database {
@@ -203,33 +350,89 @@ export function getDb(): BetterSqlite3.Database {
 
 export function getDatabaseStats(): {
   engine: string;
-  path: string;
+  storage: string;
   users: number;
   activeOffers: number;
   totalOffers: number;
   pendingRequests: number;
   acceptedRequests: number;
+  completedRequests: number;
   completedTrips: number;
   driverLocations: number;
   messages: number;
   ratings: number;
 } {
   const db = getDb();
+  const resolved = resolveDbPath();
   const count = (sql: string): number => {
     const row = db.prepare(sql).get() as { c: number } | undefined;
     return row?.c ?? 0;
   };
   return {
     engine: "SQLite 3 (WAL)",
-    path: resolveDbPath(),
+    storage: resolved === ":memory:" ? ":memory:" : "sqlite-file",
     users: count("SELECT COUNT(*) AS c FROM users"),
     activeOffers: count("SELECT COUNT(*) AS c FROM ride_offers WHERE status = 'active'"),
     totalOffers: count("SELECT COUNT(*) AS c FROM ride_offers"),
     pendingRequests: count("SELECT COUNT(*) AS c FROM ride_requests WHERE status = 'pending'"),
     acceptedRequests: count("SELECT COUNT(*) AS c FROM ride_requests WHERE status = 'accepted'"),
+    completedRequests: count("SELECT COUNT(*) AS c FROM ride_requests WHERE status = 'completed'"),
     completedTrips: count("SELECT COUNT(*) AS c FROM trip_history WHERE status = 'Completed'"),
     driverLocations: count("SELECT COUNT(*) AS c FROM driver_locations"),
     messages: count("SELECT COUNT(*) AS c FROM ride_messages"),
     ratings: count("SELECT COUNT(*) AS c FROM ride_ratings"),
   };
 }
+
+export function recordVerificationAudit(params: {
+  studentEmail?: string | null;
+  rollNumber?: string | null;
+  method: string;
+  ip: string;
+}): void {
+  const db = getDb();
+  const id = `va_${Date.now()}_${randomBytes(4).toString("hex")}`;
+  db.prepare(`
+    INSERT INTO verification_audit (id, student_email, roll_number, method, ip, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    params.studentEmail || null,
+    params.rollNumber || null,
+    params.method,
+    params.ip,
+    Date.now()
+  );
+}
+
+export interface WalletLedgerParams {
+  userId: string;
+  delta: number;
+  reason: string;
+  actorId?: string | null;
+  ref?: string | null;
+  balanceAfter: number;
+  createdAt?: number;
+}
+
+export function recordWalletLedger(
+  db: BetterSqlite3.Database,
+  params: WalletLedgerParams
+): void {
+  const id = `wled_${Date.now()}_${randomBytes(4).toString("hex")}`;
+  db.prepare(`
+    INSERT INTO wallet_ledger (id, user_id, delta, reason, actor_id, ref, balance_after, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    params.userId,
+    Math.round(params.delta),
+    params.reason,
+    params.actorId || null,
+    params.ref || null,
+    Math.round(params.balanceAfter),
+    params.createdAt ?? Date.now()
+  );
+}
+
+

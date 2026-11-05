@@ -1,7 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createRequest, cancelRequest, listRequestsForDriver, listRequestsForPassenger, getOffer } from "@/lib/rideStore";
-import { readJsonObject, requireUser } from "@/lib/apiAuth";
+import {
+  createRequest,
+  cancelRequest,
+  completeRide,
+  listRequestsForDriver,
+  listRequestsForPassenger,
+  getOffer,
+  getDriverLocation,
+  toDriverView,
+} from "@/lib/rideStore";
+import { readJsonObject, requireUser, tooManyRequests } from "@/lib/apiAuth";
 import { KJU_COORDS, MANYATA_COORDS } from "@/lib/campus";
+import { limiters } from "@/lib/limiters";
 import { cleanText, resolveCoords } from "@/lib/validate";
 
 // GET /api/rides/requests?driverId=xxx  — driver inbox (must be you, and you must be a driver)
@@ -17,41 +27,55 @@ export async function GET(req: NextRequest) {
   const passengerId = searchParams.get("passengerId");
 
   if (driverId) {
-    if (driverId !== user.id || user.role !== "driver") {
+    if (driverId !== user.id || (user.role !== "driver" && user.role !== "both")) {
       return NextResponse.json({ error: "You can only view your own driver inbox." }, { status: 403 });
     }
-    const requests = listRequestsForDriver(user.id).map((r) => ({
-      ...r,
-      otp: undefined,
-      offer: r.offerId ? getOffer(r.offerId) : undefined,
-    }));
+    const requests = listRequestsForDriver(user.id).map((r) => toDriverView(r));
     return NextResponse.json({ requests });
   }
   if (passengerId) {
     if (passengerId !== user.id) {
       return NextResponse.json({ error: "You can only view your own requests." }, { status: 403 });
     }
-    const requests = listRequestsForPassenger(user.id).map((r) => ({
-      ...r,
-      offer: r.offerId ? getOffer(r.offerId) : undefined,
-    }));
+    const requests = listRequestsForPassenger(user.id).map((r) => {
+      // Strip internal declinedBy driver IDs from passenger view
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { declinedBy, ...cleanReq } = r;
+      const offer = r.offerId ? getOffer(r.offerId) : undefined;
+      return {
+        ...cleanReq,
+        offer,
+        driverLocation: offer ? getDriverLocation(offer.driverId) : undefined,
+      };
+    });
     return NextResponse.json({ requests });
   }
   return NextResponse.json({ error: "Provide driverId or passengerId." }, { status: 400 });
 }
 
-// PATCH /api/rides/requests  body: { requestId, action: "cancel" } — cancels YOUR request
+// PATCH /api/rides/requests  body: { requestId, action: "cancel" | "complete" }
 export async function PATCH(req: NextRequest) {
   const auth = requireUser(req);
   if ("response" in auth) return auth.response;
 
+  const rateCheck = limiters.rideRequests.check(auth.user.id);
+  if (!rateCheck.allowed) {
+    return tooManyRequests(rateCheck.retryAfterSec);
+  }
+
   try {
     const body = await readJsonObject(req);
     const requestId = typeof body?.requestId === "string" ? body.requestId : "";
-    if (!body || !requestId || body.action !== "cancel") {
-      return NextResponse.json({ error: "Provide requestId and action 'cancel'." }, { status: 400 });
+    if (!body || !requestId || (body.action !== "cancel" && body.action !== "complete")) {
+      return NextResponse.json(
+        { error: "Provide requestId and action 'cancel' or 'complete'." },
+        { status: 400 }
+      );
     }
-    const result = cancelRequest(requestId, auth.user.id);
+    const result =
+      body.action === "complete"
+        ? completeRide(requestId, auth.user.id)
+        : cancelRequest(requestId, auth.user.id);
     if ("error" in result) {
       return NextResponse.json({ error: result.error }, { status: result.error === "Not authorised." ? 403 : 409 });
     }
@@ -67,6 +91,18 @@ export async function POST(req: NextRequest) {
   const auth = requireUser(req);
   if ("response" in auth) return auth.response;
   const { user } = auth;
+
+  if (!user.studentIdVerified) {
+    return NextResponse.json(
+      { error: "Please verify your university student email before requesting rides." },
+      { status: 403 }
+    );
+  }
+
+  const rateCheck = limiters.rideRequests.check(user.id);
+  if (!rateCheck.allowed) {
+    return tooManyRequests(rateCheck.retryAfterSec);
+  }
 
   try {
     const body = await readJsonObject(req);

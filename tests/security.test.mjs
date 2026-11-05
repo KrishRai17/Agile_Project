@@ -117,7 +117,7 @@ test("registerUser creates a new SQLite user and authenticates with hashed passw
   assert.equal(created.email, "ananya.verma@kju.edu");
   assert.equal(created.role, "passenger");
   assert.equal(created.studentRollNumber, "23BCAC45");
-  assert.equal(created.walletBalance, 250);
+  assert.equal(created.walletBalance, 0, "unverified accounts start with ₹0 wallet balance");
 
   // Duplicate email is rejected
   const dup = accounts.registerUser({
@@ -134,13 +134,53 @@ test("registerUser creates a new SQLite user and authenticates with hashed passw
   assert.equal(authed.id, created.id);
   assert.equal(accounts.authenticate("ananya.verma@kju.edu", "wrongPass"), null);
 
+  // Verifying student email unlocks ₹250 welcome bonus
+  const tok = accounts.createEmailVerificationToken(created.id);
+  assert.ok(!("error" in tok));
+  const verified = accounts.verifyEmailToken(tok.token);
+  assert.ok(!("error" in verified));
+  assert.equal(verified.user.walletBalance, 250);
+
   // Wallet balance can be paid and topped up
   const paid = accounts.adjustWalletBalance(created.id, -60);
   assert.ok(!("error" in paid));
   assert.equal(paid.walletBalance, 190);
   assert.ok("error" in accounts.adjustWalletBalance(created.id, -500), "blocks overdraft");
 
-  // 2-way post-ride rating updates target user rating
+  // 2-way post-ride rating requires a Completed trip in trip_history for that request and participants
+  assert.ok(
+    "error" in
+      accounts.submitUserRating({
+        requestId: "req_nonexistent",
+        raterId: created.id,
+        targetUserId: "usr_driver_demo_01",
+        stars: 5,
+      }),
+    "rejects rating when ride was not completed"
+  );
+
+  db.getDb()
+    .prepare(
+      `INSERT INTO trip_history (
+        id, request_id, offer_id, passenger_id, passenger_name,
+        driver_id, driver_name, vehicle, origin, destination, amount, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Completed', ?)`
+    )
+    .run(
+      "trip_test_rating_1",
+      "req_test_rating_1",
+      "offer_seed_001",
+      created.id,
+      created.name,
+      "usr_driver_demo_01",
+      "Aarav Mehta",
+      "HopOn Car (White Swift Dzire)",
+      "Kristu Jayanti University",
+      "Manyata Tech Park",
+      "₹75",
+      Date.now()
+    );
+
   const rated = accounts.submitUserRating({
     requestId: "req_test_rating_1",
     raterId: created.id,
@@ -152,11 +192,270 @@ test("registerUser creates a new SQLite user and authenticates with hashed passw
   assert.ok(!("error" in rated));
   assert.ok(rated.rating >= 4.8 && rated.rating <= 5.0);
 
-  // Database stats report tables
+  // Duplicate rating for the same (requestId, raterId) is rejected
+  const dupRating = accounts.submitUserRating({
+    requestId: "req_test_rating_1",
+    raterId: created.id,
+    targetUserId: "usr_driver_demo_01",
+    stars: 1,
+  });
+  assert.ok("error" in dupRating, "duplicate rating rejected");
+
+  // Stranger who was not part of the ride cannot rate either participant
+  const strangerRating = accounts.submitUserRating({
+    requestId: "req_test_rating_1",
+    raterId: "usr_driver_demo_02",
+    targetUserId: "usr_driver_demo_01",
+    stars: 1,
+  });
+  assert.ok("error" in strangerRating, "non-participant cannot rate");
+
+  // Participant cannot rate someone who wasn't the other participant on that request
+  const wrongTargetRating = accounts.submitUserRating({
+    requestId: "req_test_rating_1",
+    raterId: created.id,
+    targetUserId: "usr_driver_demo_02",
+    stars: 5,
+  });
+  assert.ok("error" in wrongTargetRating, "wrong target user rejected");
+
+  // Accepting driver CAN rate the passenger of that completed request
+  const driverRatesPassenger = accounts.submitUserRating({
+    requestId: "req_test_rating_1",
+    raterId: "usr_driver_demo_01",
+    targetUserId: created.id,
+    stars: 5,
+    tags: ["Polite", "On Time", "Extra1", "Extra2", "Extra3", "Extra4", "Extra5_Dropped"],
+    comment: "x".repeat(400),
+  });
+  assert.ok(!("error" in driverRatesPassenger));
+
+  // Verify tags and comment were capped in SQLite
+  const ratingRow = db
+    .getDb()
+    .prepare("SELECT tags, comment FROM ride_ratings WHERE request_id = ? AND rater_id = ?")
+    .get("req_test_rating_1", "usr_driver_demo_01");
+  assert.equal(JSON.parse(ratingRow.tags).length, 6, "tags capped at 6");
+  assert.equal(ratingRow.comment.length, 300, "comment capped at 300 chars");
+
+  // Database stats report tables without leaking the absolute filesystem path
   const stats = db.getDatabaseStats();
   assert.equal(stats.engine, "SQLite 3 (WAL)");
+  assert.ok(!("path" in stats), "getDatabaseStats must not return absolute path");
   assert.ok(stats.users >= 5);
   assert.ok(stats.ratings >= 1);
+});
+
+test("account pre-hijacking fix: re-registering unverified email overwrites credentials, invalidates old token & session, and fresh token verifies", () => {
+  const email = `prehijack.${Date.now()}@kju.edu`;
+  // Attacker attempts to pre-register the victim's email with their own password
+  const userA = accounts.registerUser({
+    name: "Attacker",
+    email,
+    password: "attackerPassword123",
+    role: "passenger",
+  });
+  assert.ok(!("error" in userA));
+  assert.equal(userA.studentIdVerified, false);
+
+  const tokenA = accounts.createEmailVerificationToken(userA.id);
+  assert.ok(!("error" in tokenA));
+
+  // Attacker creates a session token using their session_version
+  const verA = accounts.getUserSessionVersion(userA.id);
+  const attackerSession = session.createSessionToken(userA.id, 3600, undefined, Date.now(), verA);
+  const authA = session.verifySessionToken(attackerSession);
+  assert.ok(authA);
+  assert.equal(authA.ver, verA);
+
+  // Now legitimate student arrives and registers the same email with their own password
+  const userB = accounts.registerUser({
+    name: "Real Student",
+    email,
+    password: "studentRealPassword456",
+    role: "passenger",
+  });
+  assert.ok(!("error" in userB));
+  assert.equal(userB.id, userA.id, "re-uses user ID");
+  assert.equal(userB.name, "Real Student", "overwrites name");
+
+  // 1. Old attacker password fails to authenticate
+  assert.equal(accounts.authenticate(email, "attackerPassword123"), null, "old password rejected");
+  // 2. New student password succeeds
+  const authedB = accounts.authenticate(email, "studentRealPassword456");
+  assert.ok(authedB, "new password authenticates");
+  assert.equal(authedB.name, "Real Student");
+
+  // 3. Old attacker session version is now stale
+  const currentVer = accounts.getUserSessionVersion(userA.id);
+  assert.ok(currentVer > verA, "session version was bumped");
+  assert.notEqual(authA.ver, currentVer, "attacker session ver is outdated");
+
+  // 4. Old verification tokenA fails to verify
+  const oldVerify = accounts.verifyEmailToken(tokenA.token);
+  assert.ok("error" in oldVerify, "old verification token rejected");
+
+  // 5. Fresh verification token verifies successfully
+  const tokenB = accounts.createEmailVerificationToken(userB.id);
+  assert.ok(!("error" in tokenB));
+  const newVerify = accounts.verifyEmailToken(tokenB.token);
+  assert.ok(!("error" in newVerify));
+  assert.equal(newVerify.user.studentIdVerified, true);
+  assert.equal(newVerify.user.walletBalance, 250);
+
+  // 6. Once verified, further duplicate registration attempts are blocked
+  const dupBlocked = accounts.registerUser({
+    name: "Third Party",
+    email,
+    password: "anotherPassword789",
+    role: "passenger",
+  });
+  assert.ok("error" in dupBlocked);
+  assert.equal(dupBlocked.error, "An account with this email already exists.");
+});
+
+test("scrypt password hashing and transparent upgrade from legacy SHA-256 on login", () => {
+  const legacyUser = accounts.registerUser({
+    name: "Legacy Hash Student",
+    email: "legacy.student@kju.edu",
+    password: "initialPassword123",
+    role: "passenger",
+  });
+  assert.ok(!("error" in legacyUser));
+
+  // Simulate an old SHA-256 hash stored in SQLite
+  const oldSha256Hash = accounts.hashLegacySha256Password("myLegacyPass99", "old_salt_123");
+  assert.ok(!oldSha256Hash.startsWith("scrypt:"));
+  db.getDb()
+    .prepare("UPDATE users SET password_hash = ? WHERE id = ?")
+    .run(oldSha256Hash, legacyUser.id);
+
+  // Wrong password fails and does not upgrade
+  assert.equal(accounts.authenticate("legacy.student@kju.edu", "wrongPass"), null);
+  const beforeRow = db
+    .getDb()
+    .prepare("SELECT password_hash FROM users WHERE id = ?")
+    .get(legacyUser.id);
+  assert.equal(beforeRow.password_hash, oldSha256Hash);
+
+  // Successful login transparently upgrades the stored hash to scrypt
+  const loggedIn = accounts.authenticate("legacy.student@kju.edu", "myLegacyPass99");
+  assert.ok(loggedIn);
+  assert.equal(loggedIn.id, legacyUser.id);
+
+  const afterRow = db
+    .getDb()
+    .prepare("SELECT password_hash FROM users WHERE id = ?")
+    .get(legacyUser.id);
+  assert.ok(
+    afterRow.password_hash.startsWith("scrypt:"),
+    `expected scrypt hash after login, got ${afterRow.password_hash.slice(0, 20)}`
+  );
+
+  // Subsequent login verifies against the upgraded scrypt hash
+  assert.ok(accounts.authenticate("legacy.student@kju.edu", "myLegacyPass99"));
+});
+
+test("registration enforces ALLOWED_EMAIL_DOMAINS and validates driver vehicle details", () => {
+  const origDomains = process.env.ALLOWED_EMAIL_DOMAINS;
+  try {
+    process.env.ALLOWED_EMAIL_DOMAINS = "kristujayanti.com,kju.edu";
+
+    const badDomain = accounts.registerUser({
+      name: "Outside User",
+      email: "outside@gmail.com",
+      password: "password123",
+      role: "passenger",
+    });
+    assert.ok("error" in badDomain);
+    assert.match(badDomain.error, /university domain/i);
+
+    const missingVehicle = accounts.registerUser({
+      name: "Driver Without Plate",
+      email: "driver.noplate@kju.edu",
+      password: "password123",
+      role: "driver",
+      vehicleType: "Bike",
+      vehicleModel: "Pulsar",
+      vehicleNumber: "INVALID_PLATE",
+    });
+    assert.ok("error" in missingVehicle);
+    assert.match(missingVehicle.error, /registration plate/i);
+  } finally {
+    if (origDomains === undefined) delete process.env.ALLOWED_EMAIL_DOMAINS;
+    else process.env.ALLOWED_EMAIL_DOMAINS = origDomains;
+  }
+});
+
+test("email verification stores hashed 24h token, unlocks driver role, and strips hopon.demo in production", () => {
+  const origNodeEnv = process.env.NODE_ENV;
+  const origDemo = process.env.HOPON_ENABLE_DEMO;
+  const origDomains = process.env.ALLOWED_EMAIL_DOMAINS;
+  try {
+    delete process.env.ALLOWED_EMAIL_DOMAINS;
+    process.env.NODE_ENV = "production";
+    delete process.env.HOPON_ENABLE_DEMO;
+    assert.ok(
+      !accounts.getAllowedEmailDomains().includes("hopon.demo"),
+      "hopon.demo must not be in default ALLOWED_EMAIL_DOMAINS in production when demo is disabled"
+    );
+    process.env.HOPON_ENABLE_DEMO = "true";
+    assert.ok(
+      accounts.getAllowedEmailDomains().includes("hopon.demo"),
+      "hopon.demo is kept when HOPON_ENABLE_DEMO=true"
+    );
+  } finally {
+    if (origNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = origNodeEnv;
+    if (origDemo === undefined) delete process.env.HOPON_ENABLE_DEMO;
+    else process.env.HOPON_ENABLE_DEMO = origDemo;
+    if (origDomains === undefined) delete process.env.ALLOWED_EMAIL_DOMAINS;
+    else process.env.ALLOWED_EMAIL_DOMAINS = origDomains;
+  }
+
+  const unverifiedDriver = accounts.registerUser({
+    name: "Unverified Driver",
+    email: "verify.driver@kju.edu",
+    password: "password123",
+    role: "driver",
+    vehicleType: "Bike",
+    vehicleModel: "Yamaha FZ",
+    vehicleNumber: "KA 04 AB 9988",
+  });
+  assert.ok(!("error" in unverifiedDriver));
+  assert.equal(unverifiedDriver.studentIdVerified, false);
+  assert.equal(unverifiedDriver.role, "passenger", "role is passenger until email is verified");
+
+  const t0 = Date.now();
+  const issued = accounts.createEmailVerificationToken(unverifiedDriver.id, t0);
+  assert.ok(!("error" in issued));
+
+  // Verify the raw token is NOT stored in plaintext in SQLite
+  const row = db
+    .getDb()
+    .prepare("SELECT email_verification_hash, email_verification_expires_at FROM users WHERE id = ?")
+    .get(unverifiedDriver.id);
+  assert.notEqual(row.email_verification_hash, issued.token, "token must be stored hashed");
+  assert.equal(row.email_verification_hash, accounts.hashVerificationToken(issued.token));
+
+  // Expired token (>24h) is rejected
+  const expiredAttempt = accounts.verifyEmailToken(
+    issued.token,
+    t0 + accounts.EMAIL_VERIFICATION_TTL_MS + 1000
+  );
+  assert.ok("error" in expiredAttempt, "expired token rejected");
+
+  // Re-issue and verify within 24h window
+  const reissued = accounts.createEmailVerificationToken(unverifiedDriver.id, t0);
+  assert.ok(!("error" in reissued));
+  const verified = accounts.verifyEmailToken(reissued.token, t0 + 5000);
+  assert.ok(!("error" in verified));
+  assert.equal(verified.user.studentIdVerified, true);
+  assert.equal(verified.user.role, "driver", "driver role unlocked after verification");
+
+  // One-time token cannot be reused
+  const replay = accounts.verifyEmailToken(reissued.token, t0 + 6000);
+  assert.ok("error" in replay, "one-time token cannot be reused");
 });
 
 // ---------- rate limiting ----------
@@ -188,11 +487,67 @@ test("rate limiter reset() clears a key and maxKeys bounds memory", () => {
   assert.ok(limiter.size() <= 3, `size ${limiter.size()} should stay within maxKeys`);
 });
 
-test("clientIp prefers the first X-Forwarded-For entry", () => {
+test("clientIp only trusts X-Forwarded-For when TRUST_PROXY=true", () => {
   const headers = (map) => ({ get: (name) => map[name] ?? null });
-  assert.equal(rate.clientIp(headers({ "x-forwarded-for": "1.2.3.4, 10.0.0.1" })), "1.2.3.4");
-  assert.equal(rate.clientIp(headers({ "x-real-ip": " 5.6.7.8 " })), "5.6.7.8");
-  assert.equal(rate.clientIp(headers({})), "unknown");
+  const origTrust = process.env.TRUST_PROXY;
+  try {
+    delete process.env.TRUST_PROXY;
+    assert.equal(rate.clientIp(headers({ "x-forwarded-for": "1.2.3.4, 10.0.0.1" })), "unknown");
+    assert.equal(rate.clientIp(headers({ "x-real-ip": " 5.6.7.8 " })), "unknown");
+
+    process.env.TRUST_PROXY = "true";
+    assert.equal(rate.clientIp(headers({ "x-forwarded-for": "1.2.3.4, 10.0.0.1" })), "10.0.0.1");
+    assert.equal(rate.clientIp(headers({ "x-real-ip": " 5.6.7.8 " })), "5.6.7.8");
+    assert.equal(rate.clientIp(headers({})), "unknown");
+  } finally {
+    if (origTrust === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = origTrust;
+  }
+});
+
+test("warnIfUntrustedProxyInProduction warns in production when TRUST_PROXY is not true, and exponential backoff slows attempts without 15-min lockout", () => {
+  const origNodeEnv = process.env.NODE_ENV;
+  const origTrust = process.env.TRUST_PROXY;
+  try {
+    process.env.NODE_ENV = "production";
+    delete process.env.TRUST_PROXY;
+    assert.equal(rate.warnIfUntrustedProxyInProduction(), true);
+    process.env.TRUST_PROXY = "true";
+    assert.equal(rate.warnIfUntrustedProxyInProduction(), false);
+  } finally {
+    if (origNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = origNodeEnv;
+    if (origTrust === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = origTrust;
+  }
+
+  const backoff = rate.createExponentialBackoffLimiter({
+    freeAttempts: 3,
+    baseDelayMs: 1000,
+    maxDelayMs: 8000,
+    ttlMs: 60_000,
+  });
+
+  // First 3 attempts have 0 delay
+  assert.equal(backoff.check("student@kju.edu", NOW).allowed, true);
+  assert.equal(backoff.check("student@kju.edu", NOW).allowed, true);
+  const third = backoff.check("student@kju.edu", NOW);
+  assert.equal(third.allowed, true);
+  assert.equal(third.delayMs, 1000, "3rd attempt schedules a 1s cooldown before 4th");
+
+  // Immediate 4th attempt is slowed down (1s cooldown, NOT 15 minutes)
+  const blockedEarly = backoff.check("student@kju.edu", NOW + 200);
+  assert.equal(blockedEarly.allowed, false);
+  assert.equal(blockedEarly.retryAfterSec, 1);
+
+  // After 1s, 4th attempt is allowed and schedules a 2s cooldown
+  const fourth = backoff.check("student@kju.edu", NOW + 1000);
+  assert.equal(fourth.allowed, true);
+  assert.equal(fourth.delayMs, 2000);
+
+  // Reset clears the backoff
+  backoff.reset("student@kju.edu");
+  assert.equal(backoff.check("student@kju.edu", NOW + 1100).delayMs, 0);
 });
 
 // ---------- bounded cache ----------

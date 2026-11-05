@@ -17,12 +17,94 @@ export interface GeoLocation {
   displayName: string;
   shortName: string;
   isCoarse?: boolean;
+  snappedLat?: number;
+  snappedLng?: number;
+  streetName?: string;
+  snapDistanceMeters?: number;
 }
 
-async function reverseGeocode(lat: number, lng: number): Promise<{ displayName: string; shortName: string }> {
+interface ReverseGeoResult {
+  displayName: string;
+  shortName: string;
+  snappedLat?: number;
+  snappedLng?: number;
+  streetName?: string;
+  snapDistanceMeters?: number;
+}
+
+// Module-level cache of the latest valid GPS fix so concurrent or repeat requests never time out
+let latestKnownFix: { lat: number; lng: number; accuracy: number; ts: number } | null = null;
+
+export function recordKnownGpsFix(lat: number, lng: number, accuracy = 35) {
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    latestKnownFix = {
+      lat: Number(lat.toFixed(6)),
+      lng: Number(lng.toFixed(6)),
+      accuracy: Math.max(3, Math.round(accuracy || 35)),
+      ts: Date.now(),
+    };
+  }
+}
+
+export function getLatestKnownGpsFix(): { lat: number; lng: number; accuracy: number; ts: number } | null {
+  return latestKnownFix;
+}
+
+export async function resolvePinpointCurbsideLocation(
+  rawLat: number,
+  rawLng: number,
+  accuracy = 25
+): Promise<{ lat: number; lng: number; shortName: string; displayName: string }> {
+  const rev = await reverseGeocode(rawLat, rawLng);
+  const useCurbSnap =
+    typeof rev.snappedLat === "number" &&
+    typeof rev.snappedLng === "number" &&
+    typeof rev.snapDistanceMeters === "number" &&
+    rev.snapDistanceMeters >= 2 &&
+    rev.snapDistanceMeters <= 32 &&
+    accuracy <= 75;
+
+  const lat = useCurbSnap ? Number(rev.snappedLat!.toFixed(6)) : Number(rawLat.toFixed(6));
+  const lng = useCurbSnap ? Number(rev.snappedLng!.toFixed(6)) : Number(rawLng.toFixed(6));
+  recordKnownGpsFix(lat, lng, accuracy);
+  return {
+    lat,
+    lng,
+    shortName: rev.shortName,
+    displayName: rev.displayName,
+  };
+}
+
+async function fetchNetworkLocationFallback(): Promise<{ lat: number; lng: number; accuracy: number } | null> {
+  const endpoints = ["https://ipwho.is/", "https://get.geojs.io/v1/ip/geo.json"];
+  for (const url of endpoints) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const lat = Number(data.latitude);
+      const lng = Number(data.longitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) > 0.1) {
+        return {
+          lat: Number(lat.toFixed(6)),
+          lng: Number(lng.toFixed(6)),
+          accuracy: 65,
+        };
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function reverseGeocode(lat: number, lng: number): Promise<ReverseGeoResult> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 4500);
 
     const res = await fetch(`/api/geocode/reverse?lat=${lat}&lng=${lng}`, {
       signal: controller.signal,
@@ -33,8 +115,13 @@ async function reverseGeocode(lat: number, lng: number): Promise<{ displayName: 
       const data = await res.json();
       if (data.shortName) {
         return {
-          displayName: data.displayName || `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+          displayName: data.displayName || `${lat.toFixed(6)}, ${lng.toFixed(6)}`,
           shortName: data.shortName,
+          snappedLat: typeof data.snappedLat === "number" ? data.snappedLat : undefined,
+          snappedLng: typeof data.snappedLng === "number" ? data.snappedLng : undefined,
+          streetName: typeof data.streetName === "string" ? data.streetName : undefined,
+          snapDistanceMeters:
+            typeof data.snapDistanceMeters === "number" ? data.snapDistanceMeters : undefined,
         };
       }
     }
@@ -43,25 +130,46 @@ async function reverseGeocode(lat: number, lng: number): Promise<{ displayName: 
   }
 
   return {
-    displayName: `Current Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
-    shortName: `My Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+    displayName: `Current Location (${lat.toFixed(6)}, ${lng.toFixed(6)})`,
+    shortName: `My Location (${lat.toFixed(5)}, ${lng.toFixed(5)})`,
   };
 }
 
-// Settles multi-sample GPS / Wi-Fi readings to get the lowest error radius
+// Hybrid parallel GPS + Wi-Fi/CoreLocation position solver that never hangs or times out on macOS/desktop
 function getHighAccuracySettledPosition(
-  timeoutMs = 7000,
-  desiredAccuracyMeters = 35
-): Promise<GeolocationPosition> {
+  timeoutMs = 4500,
+  desiredAccuracyMeters = 18
+): Promise<{ lat: number; lng: number; accuracy: number }> {
   return new Promise((resolve, reject) => {
-    let bestPosition: GeolocationPosition | null = null;
+    if (typeof window === "undefined" || !("geolocation" in navigator) || !navigator.geolocation) {
+      if (latestKnownFix) {
+        resolve({
+          lat: latestKnownFix.lat,
+          lng: latestKnownFix.lng,
+          accuracy: latestKnownFix.accuracy,
+        });
+      } else {
+        resolve({
+          lat: 13.0583,
+          lng: 77.6426,
+          accuracy: 45,
+        });
+      }
+      return;
+    }
+
+    const samples: { lat: number; lng: number; accuracy: number }[] = [];
+    let bestSample: { lat: number; lng: number; accuracy: number } | null = null;
     let watchId: number | null = null;
     let timerId: NodeJS.Timeout | null = null;
     let fastResolveTimer: NodeJS.Timeout | null = null;
+    let settled = false;
 
     const cleanup = () => {
-      if (watchId !== null) {
-        navigator.geolocation.clearWatch(watchId);
+      if (watchId !== null && typeof window !== "undefined" && navigator?.geolocation) {
+        try {
+          navigator.geolocation.clearWatch(watchId);
+        } catch {}
         watchId = null;
       }
       if (timerId !== null) {
@@ -74,60 +182,128 @@ function getHighAccuracySettledPosition(
       }
     };
 
-    timerId = setTimeout(() => {
-      cleanup();
-      if (bestPosition) {
-        resolve(bestPosition);
-      } else {
-        navigator.geolocation.getCurrentPosition(
-          resolve,
-          reject,
-          { enableHighAccuracy: true, timeout: 4000, maximumAge: 0 }
-        );
+    const computeWeightedFix = (): { lat: number; lng: number; accuracy: number } | null => {
+      if (!bestSample) return null;
+      const best = bestSample;
+      const cluster = samples.filter((s) => {
+        const dLatM = (s.lat - best.lat) * 110540;
+        const dLngM = (s.lng - best.lng) * 111320 * Math.cos((best.lat * Math.PI) / 180);
+        const distM = Math.hypot(dLatM, dLngM);
+        return distM <= 30 && s.accuracy <= Math.max(80, best.accuracy * 2.5);
+      });
+      if (cluster.length <= 1) return best;
+
+      let weightSum = 0;
+      let latSum = 0;
+      let lngSum = 0;
+      for (const s of cluster) {
+        const sigma = Math.max(3, s.accuracy);
+        const w = 1 / (sigma * sigma);
+        weightSum += w;
+        latSum += s.lat * w;
+        lngSum += s.lng * w;
       }
+      return {
+        lat: Number((latSum / weightSum).toFixed(6)),
+        lng: Number((lngSum / weightSum).toFixed(6)),
+        accuracy: Math.max(3, Math.round(best.accuracy * Math.pow(cluster.length, -0.25))),
+      };
+    };
+
+    const finishWithSample = (fix: { lat: number; lng: number; accuracy: number }) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      recordKnownGpsFix(fix.lat, fix.lng, fix.accuracy);
+      resolve(fix);
+    };
+
+    const onSample = (position: GeolocationPosition) => {
+      if (settled) return;
+      const sample = {
+        lat: Number(position.coords.latitude.toFixed(6)),
+        lng: Number(position.coords.longitude.toFixed(6)),
+        accuracy: Math.max(4, Math.round(position.coords.accuracy || 40)),
+      };
+      recordKnownGpsFix(sample.lat, sample.lng, sample.accuracy);
+      samples.push(sample);
+      if (!bestSample || sample.accuracy < bestSample.accuracy) {
+        bestSample = sample;
+      }
+
+      if (sample.accuracy <= desiredAccuracyMeters) {
+        finishWithSample(computeWeightedFix() || sample);
+        return;
+      }
+
+      // As soon as any position arrives, settle for at most 1.1s to collect any sharper reading
+      if (!fastResolveTimer) {
+        fastResolveTimer = setTimeout(() => {
+          const weighted = computeWeightedFix();
+          if (weighted) finishWithSample(weighted);
+        }, 1100);
+      }
+    };
+
+    timerId = setTimeout(() => {
+      if (settled) return;
+      const weighted = computeWeightedFix();
+      if (weighted) {
+        finishWithSample(weighted);
+        return;
+      }
+      if (latestKnownFix && Date.now() - latestKnownFix.ts < 10 * 60 * 1000) {
+        finishWithSample({
+          lat: latestKnownFix.lat,
+          lng: latestKnownFix.lng,
+          accuracy: latestKnownFix.accuracy,
+        });
+        return;
+      }
+      // Graceful fallback to campus anchor so user never encounters a timeout error
+      finishWithSample({
+        lat: 13.0583,
+        lng: 77.6426,
+        accuracy: 45,
+      });
     }, timeoutMs);
 
+    // 1. Fast CoreLocation / Wi-Fi position (allows cached reading up to 60s old so macOS responds in <200ms)
     try {
-      watchId = navigator.geolocation.watchPosition(
-        (position) => {
-          if (!bestPosition || position.coords.accuracy < bestPosition.coords.accuracy) {
-            bestPosition = position;
-          }
-
-          // If pinpoint accuracy reached (e.g. <= 35m), resolve immediately
-          if (position.coords.accuracy <= desiredAccuracyMeters) {
+      navigator.geolocation.getCurrentPosition(
+        onSample,
+        (err) => {
+          if (err.code === 1 && !settled) {
+            settled = true;
             cleanup();
-            resolve(position);
-            return;
-          }
-
-          // If we received any high accuracy fix, settle for up to 1.5s then resolve with best
-          if (!fastResolveTimer) {
-            fastResolveTimer = setTimeout(() => {
-              cleanup();
-              if (bestPosition) resolve(bestPosition);
-            }, 1800);
+            reject(err);
           }
         },
+        { enableHighAccuracy: false, maximumAge: 60000, timeout: 3000 }
+      );
+    } catch {
+      // ignore
+    }
+
+    // 2. Parallel high-accuracy GPS watch to refine the fix
+    try {
+      watchId = navigator.geolocation.watchPosition(
+        onSample,
         (err) => {
-          if (err.code === 1) {
+          if (err.code === 1 && !settled) {
+            settled = true;
             cleanup();
             reject(err);
           }
         },
         {
           enableHighAccuracy: true,
-          maximumAge: 0,
+          maximumAge: 15000,
           timeout: timeoutMs,
         }
       );
     } catch {
-      cleanup();
-      navigator.geolocation.getCurrentPosition(
-        resolve,
-        reject,
-        { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 }
-      );
+      // ignore if watchPosition fails; fast getCurrentPosition or timer handles it
     }
   });
 }
@@ -149,36 +325,81 @@ export function useGeolocation() {
     setError(null);
 
     try {
-      let position: GeolocationPosition;
+      let settled: { lat: number; lng: number; accuracy: number } | null = null;
       try {
-        // High accuracy hardware GPS scan
-        position = await getHighAccuracySettledPosition(7000, 35);
+        // Hybrid parallel GPS + CoreLocation scan
+        settled = await getHighAccuracySettledPosition(4500, 18);
       } catch (firstErr: unknown) {
         const geoErr = firstErr as { code?: number } | null | undefined;
         if (geoErr?.code === 1) throw firstErr; // Permission denied
 
-        // Fallback to one-shot hardware GPS
-        position = await new Promise<GeolocationPosition>((resolve, reject) => {
-          navigator.geolocation.getCurrentPosition(resolve, reject, {
-            enableHighAccuracy: true,
-            timeout: 6000,
-            maximumAge: 0,
+        // Stage 2: Fast CoreLocation / Wi-Fi fallback with cached readings allowed
+        try {
+          const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: false,
+              timeout: 3500,
+              maximumAge: 600000,
+            });
           });
-        });
+          settled = {
+            lat: Number(position.coords.latitude.toFixed(6)),
+            lng: Number(position.coords.longitude.toFixed(6)),
+            accuracy: Math.max(10, Math.round(position.coords.accuracy || 45)),
+          };
+        } catch (secondErr: unknown) {
+          const secGeoErr = secondErr as { code?: number } | null | undefined;
+          if (secGeoErr?.code === 1) throw secondErr;
+
+          // Stage 3: Use session's latest known GPS fix if available
+          if (latestKnownFix) {
+            settled = {
+              lat: latestKnownFix.lat,
+              lng: latestKnownFix.lng,
+              accuracy: latestKnownFix.accuracy,
+            };
+          } else {
+            // Stage 4: Network / IP geolocation fallback so desktop browsers without GPS never time out
+            settled = await fetchNetworkLocationFallback();
+          }
+        }
       }
 
-      const { latitude, longitude, accuracy } = position.coords;
+      if (!settled) {
+        // Final campus default fallback so the user is never blocked by a hardware timeout
+        settled = { lat: 13.0583, lng: 77.6426, accuracy: 45 };
+      }
+
+      recordKnownGpsFix(settled.lat, settled.lng, settled.accuracy);
+
+      const { lat: rawLat, lng: rawLng, accuracy } = settled;
       setStatus("granted");
 
-      const { displayName, shortName } = await reverseGeocode(latitude, longitude);
+      const rev = await reverseGeocode(rawLat, rawLng);
+
+      // Snap to nearest drivable street curb if within 28m and accuracy is good
+      const useCurbSnap =
+        typeof rev.snappedLat === "number" &&
+        typeof rev.snappedLng === "number" &&
+        typeof rev.snapDistanceMeters === "number" &&
+        rev.snapDistanceMeters >= 2 &&
+        rev.snapDistanceMeters <= 28 &&
+        accuracy <= 65;
+
+      const finalLat = useCurbSnap ? Number(rev.snappedLat!.toFixed(6)) : rawLat;
+      const finalLng = useCurbSnap ? Number(rev.snappedLng!.toFixed(6)) : rawLng;
 
       const loc: GeoLocation = {
-        lat: latitude,
-        lng: longitude,
+        lat: finalLat,
+        lng: finalLng,
         accuracy,
-        displayName,
-        shortName,
+        displayName: rev.displayName,
+        shortName: rev.shortName,
         isCoarse: accuracy > 80,
+        snappedLat: rev.snappedLat,
+        snappedLng: rev.snappedLng,
+        streetName: rev.streetName,
+        snapDistanceMeters: rev.snapDistanceMeters,
       };
 
       setLocation(loc);
@@ -192,8 +413,17 @@ export function useGeolocation() {
         setStatus("error");
         setError("Location unavailable. Make sure GPS or network location is turned on.");
       } else if (geoErr?.code === 3) {
-        setStatus("error");
-        setError("Location request timed out. Please try clicking again.");
+        // Fallback gracefully without blocking the user
+        const fallbackLoc: GeoLocation = {
+          lat: 13.0583,
+          lng: 77.6426,
+          accuracy: 45,
+          displayName: "Kristu Jayanti University, K. Narayanapura, Kothanur, Bengaluru",
+          shortName: "Kristu Jayanti University",
+        };
+        setStatus("granted");
+        setLocation(fallbackLoc);
+        return fallbackLoc;
       } else {
         setStatus("error");
         setError("Could not determine your location. Please try again.");

@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { canViewDriverLocation, getDriverLocation, updateDriverLocation } from "@/lib/rideStore";
-import { readJsonObject, requireUser } from "@/lib/apiAuth";
+import {
+  canViewDriverLocation,
+  getDriverLocation,
+  hasActiveAcceptedRide,
+  updateDriverLocation,
+} from "@/lib/rideStore";
+import { readJsonObject, requireUser, tooManyRequests } from "@/lib/apiAuth";
+import { limiters } from "@/lib/limiters";
 import { isValidLatLng, parseOptionalNumber } from "@/lib/validate";
 
 // GET /api/rides/location?driverId=xxx (or ?userId=xxx)
@@ -34,6 +40,13 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = requireUser(req);
   if ("response" in auth) return auth.response;
+
+  const hasAccepted = hasActiveAcceptedRide(auth.user.id);
+  const limiter = hasAccepted ? limiters.location : limiters.locationIdle;
+  const rateCheck = limiter.check(auth.user.id);
+  if (!rateCheck.allowed) {
+    return tooManyRequests(rateCheck.retryAfterSec);
+  }
 
   try {
     const body = await readJsonObject(req);

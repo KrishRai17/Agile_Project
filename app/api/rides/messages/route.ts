@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonObject, requireUser, tooManyRequests } from "@/lib/apiAuth";
 import { limiters } from "@/lib/limiters";
-import { listRideMessages, sendRideMessage } from "@/lib/rideStore";
+import { listRideMessages, sendRideMessage, getRequest, getOffer } from "@/lib/rideStore";
 
 /**
  * GET /api/rides/messages?requestId=xxx — Returns chat messages for an active/accepted ride.
@@ -47,11 +47,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "requestId and text are required." }, { status: 400 });
   }
 
+  const rideReq = getRequest(requestId);
+  const rideOffer = rideReq?.offerId ? getOffer(rideReq.offerId) : undefined;
+  const isThisDriver =
+    rideOffer?.driverId === auth.user.id ||
+    (auth.user.role === "driver" && rideReq?.passengerId !== auth.user.id);
+  const senderRole: "driver" | "passenger" = isThisDriver ? "driver" : "passenger";
+
   const result = sendRideMessage({
     requestId,
     senderId: auth.user.id,
     senderName: auth.user.name,
-    senderRole: auth.user.role === "driver" ? "driver" : "passenger",
+    senderRole,
     text,
   });
 

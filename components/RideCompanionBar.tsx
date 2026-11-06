@@ -18,7 +18,7 @@ import { playNotificationChime } from "@/lib/notifications";
 
 interface RideCompanionBarProps {
   requestId: string;
-  userRole: "passenger" | "driver";
+  userRole: "passenger" | "driver" | "both";
   userId: string;
   counterpartyName: string;
   fare?: string;
@@ -110,10 +110,10 @@ export default function RideCompanionBar({
   };
 
   const handleShareTrip = async () => {
-    if (userRole !== "passenger") {
+    if (userRole !== "passenger" && userRole !== "both") {
       showToast(
-        "Passenger Feature",
-        "Only the passenger can generate or revoke a public tracking link.",
+        "Passenger Privacy Feature",
+        "For student safety, only the passenger can generate or share the live tracking link.",
         "info"
       );
       return;
@@ -309,41 +309,19 @@ export default function RideCompanionBar({
           </div>
 
           <div className="flex items-center gap-3 bg-white p-3 rounded-xl border border-indigo-100">
-            {/* Deterministic stylized SVG QR matrix */}
-            <svg
-              viewBox="0 0 64 64"
-              className="w-16 h-16 shrink-0 rounded-lg border border-slate-200 p-1 bg-white"
-              aria-label="UPI QR Code"
-            >
-              <rect width="64" height="64" fill="#ffffff" />
-              <rect x="4" y="4" width="18" height="18" fill="none" stroke="#0f172a" strokeWidth="4" />
-              <rect x="10" y="10" width="6" height="6" fill="#0f172a" />
-              <rect x="42" y="4" width="18" height="18" fill="none" stroke="#0f172a" strokeWidth="4" />
-              <rect x="48" y="10" width="6" height="6" fill="#0f172a" />
-              <rect x="4" y="42" width="18" height="18" fill="none" stroke="#0f172a" strokeWidth="4" />
-              <rect x="10" y="48" width="6" height="6" fill="#0f172a" />
-              <rect x="26" y="8" width="4" height="4" fill="#4f46e5" />
-              <rect x="32" y="14" width="4" height="8" fill="#0f172a" />
-              <rect x="26" y="26" width="12" height="12" fill="#4f46e5" />
-              <rect x="12" y="28" width="8" height="4" fill="#0f172a" />
-              <rect x="44" y="28" width="12" height="4" fill="#0f172a" />
-              <rect x="28" y="44" width="6" height="12" fill="#0f172a" />
-              <rect x="40" y="42" width="8" height="8" fill="#4f46e5" />
-              <rect x="52" y="48" width="6" height="10" fill="#0f172a" />
-            </svg>
+            <div className="w-12 h-12 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center shrink-0">
+              <Wallet className="w-6 h-6 text-indigo-600" />
+            </div>
             <div className="min-w-0 flex-1 space-y-1">
               <p className="text-xs font-bold text-slate-900">
-                Scan with GPay / PhonePe / Paytm
+                HopOn Student Wallet Settlement
               </p>
-              <p className="text-[11px] text-slate-500 truncate">
-                UPI ID: <span className="font-mono font-semibold text-slate-700">hopon.kju@okaxis</span>
+              <p className="text-[11px] text-slate-500">
+                ₹{numericFare} auto-transfers from passenger wallet to driver upon dropoff.
               </p>
-              <div className="mt-1 py-1.5 px-2.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-800 text-[10px] font-semibold flex items-center gap-1.5">
-                <Wallet className="w-3.5 h-3.5 shrink-0 text-indigo-600" />
-                <span>
-                  <CheckCircle2 className="w-3 h-3 inline mr-1 text-emerald-600" />
-                  ₹{numericFare} auto-settles via HopOn Wallet on ride completion
-                </span>
+              <div className="mt-1 py-1 px-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-semibold flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                <span>Zero cash needed · Verified campus student ledger</span>
               </div>
             </div>
           </div>
@@ -355,7 +333,7 @@ export default function RideCompanionBar({
         <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 space-y-2.5 animate-in fade-in duration-150">
           <div className="flex items-center justify-between">
             <span className="text-xs font-extrabold text-rose-900">
-              🚨 KJU Campus Safety &amp; Emergency SOS
+              🚨 Campus Emergency &amp; Safety Contacts
             </span>
             <button
               type="button"
@@ -366,29 +344,31 @@ export default function RideCompanionBar({
             </button>
           </div>
           <p className="text-[11px] text-rose-800 leading-snug">
-            Your live GPS coordinates and vehicle details are logged with HopOn Campus Safety.
+            In any urgent or safety situation, contact emergency response or campus security immediately:
           </p>
-          <div className="flex gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <a
               href="tel:112"
-              className="flex-1 py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs"
+              className="py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs"
             >
               <PhoneCall className="w-3.5 h-3.5" />
-              <span>Call Emergency (112)</span>
+              <span>National 112</span>
+            </a>
+            <a
+              href="tel:08068737777"
+              className="py-2 px-3 rounded-xl bg-rose-100 hover:bg-rose-200 text-rose-900 border border-rose-300 text-xs font-bold flex items-center justify-center gap-1.5"
+            >
+              <PhoneCall className="w-3.5 h-3.5" />
+              <span>KJU Security</span>
             </a>
             <button
               type="button"
               onClick={() => {
                 void handleShareTrip();
-                showToast(
-                  "Campus Security Alerted 🛡️",
-                  "Your live ride link and GPS telemetry are ready to share with KJU Security Desk.",
-                  "info"
-                );
               }}
-              className="flex-1 py-2 px-3 rounded-xl bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 text-xs font-bold cursor-pointer"
+              className="py-2 px-3 rounded-xl bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 text-xs font-bold cursor-pointer flex items-center justify-center gap-1"
             >
-              Copy SOS Tracking Link
+              <span>Copy Live Link</span>
             </button>
           </div>
         </div>

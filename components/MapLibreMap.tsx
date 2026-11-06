@@ -1449,10 +1449,11 @@ export default function MapLibreMap({
             {onClearAcceptedRoute && (
               <button
                 type="button"
-                onClick={onClearAcceptedRoute}
-                className="text-slate-400 hover:text-slate-700 text-xs font-semibold px-2 py-0.5 rounded-md hover:bg-slate-100 cursor-pointer"
+                onClick={() => onClearAcceptedRoute()}
+                className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 text-[11px] font-bold px-2 py-0.5 rounded-md cursor-pointer transition-colors"
+                title="Cancel this ride"
               >
-                Close ✕
+                Cancel Ride ✕
               </button>
             )}
           </div>

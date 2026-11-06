@@ -75,32 +75,6 @@ export async function resolvePinpointCurbsideLocation(
   };
 }
 
-async function fetchNetworkLocationFallback(): Promise<{ lat: number; lng: number; accuracy: number } | null> {
-  const endpoints = ["https://ipwho.is/", "https://get.geojs.io/v1/ip/geo.json"];
-  for (const url of endpoints) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
-    try {
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const lat = Number(data.latitude);
-      const lng = Number(data.longitude);
-      if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) > 0.1) {
-        return {
-          lat: Number(lat.toFixed(6)),
-          lng: Number(lng.toFixed(6)),
-          accuracy: 65,
-        };
-      }
-    } catch {
-      clearTimeout(timer);
-    }
-  }
-  return null;
-}
-
 async function reverseGeocode(lat: number, lng: number): Promise<ReverseGeoResult> {
   try {
     const controller = new AbortController();
@@ -260,12 +234,9 @@ function getHighAccuracySettledPosition(
         });
         return;
       }
-      // Graceful fallback to campus anchor so user never encounters a timeout error
-      finishWithSample({
-        lat: 13.0583,
-        lng: 77.6426,
-        accuracy: 45,
-      });
+      settled = true;
+      cleanup();
+      reject(new Error("Geolocation request timed out."));
     }, timeoutMs);
 
     // 1. Fast CoreLocation / Wi-Fi position (allows cached reading up to 60s old so macOS responds in <200ms)
@@ -358,16 +329,13 @@ export function useGeolocation() {
               lng: latestKnownFix.lng,
               accuracy: latestKnownFix.accuracy,
             };
-          } else {
-            // Stage 4: Network / IP geolocation fallback so desktop browsers without GPS never time out
-            settled = await fetchNetworkLocationFallback();
           }
         }
       }
 
       if (!settled) {
-        // Final campus default fallback so the user is never blocked by a hardware timeout
-        settled = { lat: 13.0583, lng: 77.6426, accuracy: 45 };
+        setStatus("unavailable");
+        return null;
       }
 
       recordKnownGpsFix(settled.lat, settled.lng, settled.accuracy);

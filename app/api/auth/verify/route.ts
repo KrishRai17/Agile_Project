@@ -77,8 +77,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
-    // If the verified student registered as a driver, publish their initial campus offer once verified
-    if (result.user.role === "driver" && countActiveOffersForDriver(result.user.id) === 0) {
+    // If the verified student registered as a driver or both, publish their initial campus offer once verified
+    if (
+      (result.user.role === "driver" || result.user.role === "both") &&
+      countActiveOffersForDriver(result.user.id) === 0
+    ) {
       const vehicleInfo = getDriverVehicleInfo(result.user.id);
       if (vehicleInfo) {
         createOffer({

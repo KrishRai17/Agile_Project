@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS users (
   wallet_balance INTEGER NOT NULL DEFAULT 0,
   rating REAL NOT NULL DEFAULT 5.0,
   rides_completed INTEGER NOT NULL DEFAULT 0,
-  role TEXT NOT NULL CHECK(role IN ('passenger', 'driver')),
+  role TEXT NOT NULL CHECK(role IN ('passenger', 'driver', 'both')),
   vehicle_model TEXT,
   vehicle_number TEXT,
   vehicle_type TEXT,
@@ -219,6 +219,53 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
   }
   if (!names.has("session_version")) {
     db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1");
+  }
+
+  // Widen role CHECK constraint to include 'both' if existing DB table was created with only ('passenger', 'driver')
+  const userTableSqlRow = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'")
+    .get() as { sql?: string } | undefined;
+  if (userTableSqlRow?.sql && !userTableSqlRow.sql.includes("'both'")) {
+    db.exec(`
+      BEGIN TRANSACTION;
+      CREATE TABLE users_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        university TEXT NOT NULL DEFAULT 'Kristu Jayanti University',
+        student_id_verified INTEGER NOT NULL DEFAULT 0,
+        student_roll_number TEXT,
+        wallet_balance INTEGER NOT NULL DEFAULT 0,
+        rating REAL NOT NULL DEFAULT 5.0,
+        rides_completed INTEGER NOT NULL DEFAULT 0,
+        role TEXT NOT NULL CHECK(role IN ('passenger', 'driver', 'both')),
+        vehicle_model TEXT,
+        vehicle_number TEXT,
+        vehicle_type TEXT,
+        email_verification_hash TEXT,
+        email_verification_expires_at INTEGER,
+        session_version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO users_new (
+        id, name, email, password_hash, university, student_id_verified,
+        student_roll_number, wallet_balance, rating, rides_completed, role,
+        vehicle_model, vehicle_number, vehicle_type,
+        email_verification_hash, email_verification_expires_at, session_version, created_at
+      )
+      SELECT
+        id, name, email, password_hash, university, student_id_verified,
+        student_roll_number, wallet_balance, rating, rides_completed, role,
+        vehicle_model, vehicle_number, vehicle_type,
+        email_verification_hash, email_verification_expires_at,
+        COALESCE(session_version, 1), created_at
+      FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+      COMMIT;
+    `);
   }
   db.exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_trip_history_completed_request ON trip_history(request_id) WHERE status = 'Completed'"

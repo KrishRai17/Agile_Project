@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listActiveOffers, createOffer, countActiveOffersForDriver } from "@/lib/rideStore";
 import { readJsonObject, requireUser } from "@/lib/apiAuth";
-import { isDemoUserId, getUserById } from "@/lib/accounts";
+import { isDemoUserId, isDemoEmail, getUserById } from "@/lib/accounts";
 import { KJU_COORDS, MANYATA_COORDS } from "@/lib/campus";
 import {
   cleanText,
@@ -27,19 +27,7 @@ export async function GET(req: NextRequest) {
       if (String(o.id).startsWith("offer_seed_")) return false;
       if (isDemoUserId(o.driverId)) return false;
       const driver = getUserById(o.driverId);
-      if (!driver) return false;
-      const email = (driver.email || "").toLowerCase();
-      if (
-        email.endsWith("@hopon.demo") ||
-        email.endsWith("@kju.edu") ||
-        email.startsWith("test") ||
-        email.includes("test")
-      ) {
-        return false;
-      }
-      if (["New Rider", "Wallet Driver", "Broke Student", "Test User"].includes(driver.name)) {
-        return false;
-      }
+      if (driver && isDemoEmail(driver.email)) return false;
       return true;
     });
   }

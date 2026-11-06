@@ -172,22 +172,28 @@ export default function HomePage() {
       recordKnownGpsFix(loc.lat, loc.lng, loc.accuracy);
       setUserLocation(loc);
 
-      // Broadcast live GPS location for both drivers and passengers so active rides reflect real movement
+      // Broadcast live GPS location only when in an active ride or on driver duty
       if (user) {
-        fetch("/api/rides/location", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            lat: loc.lat,
-            lng: loc.lng,
-          }),
-        }).catch(() => {});
+        const isRideActive = Boolean(activeAcceptedRide);
+        const isDriverOnDuty = user.role === "driver" || user.role === "both";
+        if (isRideActive || isDriverOnDuty) {
+          fetch("/api/rides/location", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              lat: loc.lat,
+              lng: loc.lng,
+            }),
+          }).catch(() => {});
+        }
 
-        if (user.role === "driver") {
-          const exactLat = Number(loc.lat.toFixed(6));
-          const exactLng = Number(loc.lng.toFixed(6));
-          setActiveAcceptedRide((prev) => {
-            if (!prev) return null;
+        setActiveAcceptedRide((prev) => {
+          if (!prev) return null;
+          const isUserDriver =
+            prev.driverId === user.id || (user.role === "driver" && prev.passengerId !== user.id);
+          if (isUserDriver) {
+            const exactLat = Number(loc.lat.toFixed(6));
+            const exactLng = Number(loc.lng.toFixed(6));
             return {
               ...prev,
               driverLocation: {
@@ -196,10 +202,7 @@ export default function HomePage() {
                 name: prev.driverLocation.name || "Rider (Live GPS)",
               },
             };
-          });
-        } else if (user.role === "passenger") {
-          setActiveAcceptedRide((prev) => {
-            if (!prev) return null;
+          } else {
             if (prev.tripStage === "in_progress") return prev;
             // Only refine pickup pin with live GPS if the passenger is within 800m of their booked pickup
             const distFromBookedPickupKm = haversineKm(
@@ -225,8 +228,8 @@ export default function HomePage() {
                 name: prev.pickupLocation.name,
               },
             };
-          });
-        }
+          }
+        });
       }
 
       if (!force) return;
@@ -262,7 +265,7 @@ export default function HomePage() {
         });
       }
     },
-    [user]
+    [user, activeAcceptedRide]
   );
 
   // Keep the latest handler in a ref so the mount-time GPS request runs exactly once
@@ -559,45 +562,70 @@ export default function HomePage() {
     } else setDropoff(location);
   };
 
-  const handleClearAcceptedRoute = useCallback(() => {
+  const handleClearAcceptedRoute = useCallback(async (explicitAction?: "complete" | "cancel") => {
     const rideSnapshot = activeAcceptedRide;
-    const reqId = rideSnapshot?.requestId || `KJU-RIDE-${Date.now()}`;
+    if (!rideSnapshot?.requestId) {
+      setActiveAcceptedRide(null);
+      return;
+    }
+
+    const reqId = rideSnapshot.requestId;
     const isCompletedTrip =
-      rideSnapshot?.tripStage === "in_progress" ||
-      rideSnapshot?.phase === "dropoff";
+      explicitAction === "complete" ||
+      rideSnapshot.tripStage === "in_progress" ||
+      rideSnapshot.phase === "dropoff";
 
-    setActiveAcceptedRide(null);
+    const action = explicitAction || (isCompletedTrip ? "complete" : "cancel");
 
-    if (rideSnapshot?.requestId) {
-      fetch("/api/rides/requests", {
+    // Require explicit confirmation before cancelling an active ride
+    if (action === "cancel") {
+      const confirmCancel = window.confirm("Are you sure you want to cancel this ride?");
+      if (!confirmCancel) return;
+    }
+
+    try {
+      const res = await fetch("/api/rides/requests", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           requestId: rideSnapshot.requestId,
-          action: isCompletedTrip ? "complete" : "cancel",
+          action,
         }),
-      }).catch(() => {});
-    }
-
-    if (isCompletedTrip) {
-      const counterpartyId =
-        user?.role === "driver"
-          ? (rideSnapshot?.passengerId || "passenger_demo")
-          : (rideSnapshot?.driverId || "driver_rohan");
-      const counterpartyName =
-        user?.role === "driver"
-          ? (rideSnapshot?.passengerName || "Student Passenger")
-          : (rideSnapshot?.driverName || "Rohan Mehta");
-
-      setRatingTarget({
-        requestId: reqId,
-        targetUserId: counterpartyId,
-        targetName: counterpartyName,
-        targetRole: user?.role === "driver" ? "passenger" : "driver",
-        fare: rideSnapshot?.fare || "75",
       });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast("Ride Action Failed", data.error || `Could not ${action} ride.`, "error");
+        return;
+      }
+
+      setActiveAcceptedRide(null);
+
+      if (action === "complete") {
+        showToast("Ride Completed! 🎉", "Fare transferred successfully.", "success");
+        const isUserDriver =
+          rideSnapshot.driverId === user?.id ||
+          (user?.role === "driver" && rideSnapshot.passengerId !== user?.id);
+        const counterpartyId = isUserDriver
+          ? rideSnapshot.passengerId || "passenger_demo"
+          : rideSnapshot.driverId || "driver_rohan";
+        const counterpartyName = isUserDriver
+          ? rideSnapshot.passengerName || "Student Passenger"
+          : rideSnapshot.driverName || "Student Driver";
+
+        setRatingTarget({
+          requestId: reqId,
+          targetUserId: counterpartyId,
+          targetName: counterpartyName,
+          targetRole: isUserDriver ? "passenger" : "driver",
+          fare: rideSnapshot.fare || "75",
+        });
+      } else {
+        showToast("Ride Cancelled", "This ride was cancelled.", "info");
+      }
+    } catch {
+      showToast("Network Error", `Could not ${action} ride. Please check your connection.`, "error");
     }
-  }, [activeAcceptedRide, user?.role]);
+  }, [activeAcceptedRide, showToast, user]);
 
   const handleDriverArrived = useCallback(async () => {
     const reqId = activeAcceptedRide?.requestId;
@@ -826,7 +854,11 @@ export default function HomePage() {
                 onGpsUpdate={handleDeviceGpsUpdate}
                 acceptedRideRoute={activeAcceptedRide}
                 onClearAcceptedRoute={handleClearAcceptedRoute}
-                isDriver={user?.role === "driver"}
+                isDriver={
+                  activeAcceptedRide
+                    ? activeAcceptedRide.driverId === user?.id
+                    : user?.role === "driver" || user?.role === "both"
+                }
                 onDriverLocationUpdate={handleDriverLocationUpdate}
                 onRidePhaseChange={(phase) =>
                   setActiveAcceptedRide((prev) => (prev ? { ...prev, phase } : null))

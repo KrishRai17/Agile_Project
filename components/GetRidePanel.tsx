@@ -251,36 +251,11 @@ export default function GetRidePanel({
           ]);
 
           const realOffers = data.offers.filter(
-            (o: { id: string; driverId?: string; driverName?: string; driverEmail?: string }) => {
+            (o: { id: string; driverId?: string }) => {
               if (!o) return false;
               if (String(o.id).startsWith("offer_seed_")) return false;
               const dId = String(o.driverId || "");
               if (DEMO_DRIVER_IDS.has(dId) || dId.startsWith("usr_driver_demo_") || dId === "usr_krish_rai_01") {
-                return false;
-              }
-              const email = String(o.driverEmail || "").toLowerCase();
-              if (
-                email.endsWith("@hopon.demo") ||
-                email.endsWith("@kju.edu") ||
-                email.includes("test") ||
-                email === "student@hopon.demo" ||
-                email === "driver@hopon.demo"
-              ) {
-                return false;
-              }
-              const name = String(o.driverName || "").trim();
-              if (
-                [
-                  "Aarav Mehta",
-                  "Rohan Varma",
-                  "Priya Nair",
-                  "Krish Rai",
-                  "New Rider",
-                  "Wallet Driver",
-                  "Broke Student",
-                  "Test User",
-                ].includes(name)
-              ) {
                 return false;
               }
               return true;
@@ -863,7 +838,7 @@ export default function GetRidePanel({
 
   // Restore any active passenger request (pending or accepted) on mount / login
   useEffect(() => {
-    if (!user || user.role !== "passenger") return;
+    if (!user || (user.role !== "passenger" && user.role !== "both")) return;
     let cancelled = false;
     (async () => {
       try {

@@ -314,6 +314,42 @@ test("account pre-hijacking fix: re-registering unverified email overwrites cred
   assert.equal(dupBlocked.error, "An account with this email already exists.");
 });
 
+test("registers a 'both' (rider & passenger) user with vehicle details and unlocks dual role upon verification", () => {
+  const email = `both.user.${Date.now()}@kju.edu`;
+  const registered = accounts.registerUser({
+    name: "Dual Role Student",
+    email,
+    password: "dualRolePass123",
+    role: "both",
+    vehicleType: "Bike",
+    vehicleModel: "Yamaha FZ",
+    vehicleNumber: "KA 03 HA 4321",
+  });
+
+  assert.ok(!("error" in registered), "both role registration succeeds in SQLite");
+  assert.equal(registered.email, email);
+  // Unverified defaults to passenger role until email verification
+  assert.equal(registered.role, "passenger");
+  assert.equal(registered.vehicleModel, "Yamaha FZ");
+  assert.equal(registered.vehicleNumber, "KA 03 HA 4321");
+
+  // Create verification token and verify
+  const token = accounts.createEmailVerificationToken(registered.id);
+  assert.ok(!("error" in token));
+  const verified = accounts.verifyEmailToken(token.token);
+  assert.ok(!("error" in verified));
+  assert.equal(verified.user.role, "both", "role becomes 'both' upon verification");
+  assert.equal(verified.user.studentIdVerified, true);
+
+  // Check driver verification helper recognizes both role
+  assert.ok(accounts.isDriverVerified(registered.id), "isDriverVerified recognises both role");
+  const vehicle = accounts.getDriverVehicleInfo(registered.id);
+  assert.ok(vehicle, "getDriverVehicleInfo returns vehicle for both role");
+  assert.equal(vehicle.vehicleModel, "Yamaha FZ");
+  assert.equal(vehicle.vehicleNumber, "KA 03 HA 4321");
+  assert.equal(vehicle.vehicleType, "Bike");
+});
+
 test("scrypt password hashing and transparent upgrade from legacy SHA-256 on login", () => {
   const legacyUser = accounts.registerUser({
     name: "Legacy Hash Student",

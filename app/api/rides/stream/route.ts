@@ -24,47 +24,48 @@ export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
   let cleanup: (() => void) | null = null;
 
-  const isDriver =
+  const isDriverOrBoth =
     user.role === "driver" ||
     user.role === "both" ||
     Boolean(user.vehicleModel || user.vehicleNumber);
+  const isPassengerOrBoth = user.role === "passenger" || user.role === "both";
 
   const buildSnapshot = () => {
-    if (isDriver) {
-      const rawRequests = listRequestsForDriver(user.id);
-      const activeAccepted = rawRequests.find((r) => r.status === "accepted");
-      const counterpartyLocation = activeAccepted
-        ? getDriverLocation(activeAccepted.passengerId) ?? null
-        : null;
-      const requests = rawRequests.map((r) => toDriverView(r));
-      const offers = listActiveOffers().filter((o) => o.driverId === user.id);
+    const rawDriverRequests = isDriverOrBoth ? listRequestsForDriver(user.id) : [];
+    const driverRequests = rawDriverRequests.map((r) => toDriverView(r));
+    const driverOffers = isDriverOrBoth
+      ? listActiveOffers().filter((o) => o.driverId === user.id)
+      : [];
+
+    const rawPassengerRequests = isPassengerOrBoth ? listRequestsForPassenger(user.id) : [];
+    const passengerRequests = rawPassengerRequests.map((r) => {
+      // Strip internal declinedBy driver IDs from passenger view
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { declinedBy, ...cleanReq } = r;
       return {
-        role: "driver",
-        requests,
-        offers,
-        counterpartyLocation,
-        timestamp: Date.now(),
+        ...cleanReq,
+        offer: r.offerId ? getOffer(r.offerId) : undefined,
       };
-    } else {
-      const requests = listRequestsForPassenger(user.id).map((r) => {
-        // Strip internal declinedBy driver IDs from passenger view
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { declinedBy, ...cleanReq } = r;
-        return {
-          ...cleanReq,
-          offer: r.offerId ? getOffer(r.offerId) : undefined,
-        };
-      });
-      const activeAccepted = requests.find((r) => r.status === "accepted");
-      const driverId = activeAccepted?.offer?.driverId;
-      const counterpartyLocation = driverId ? getDriverLocation(driverId) ?? null : null;
-      return {
-        role: "passenger",
-        requests,
-        counterpartyLocation,
-        timestamp: Date.now(),
-      };
+    });
+
+    const activeDriverAccepted = rawDriverRequests.find((r) => r.status === "accepted");
+    const activePassengerAccepted = passengerRequests.find((r) => r.status === "accepted");
+
+    let counterpartyLocation = null;
+    if (activeDriverAccepted) {
+      counterpartyLocation = getDriverLocation(activeDriverAccepted.passengerId) ?? null;
+    } else if (activePassengerAccepted?.offer?.driverId) {
+      counterpartyLocation = getDriverLocation(activePassengerAccepted.offer.driverId) ?? null;
     }
+
+    return {
+      role: user.role,
+      requests: isDriverOrBoth ? driverRequests : passengerRequests,
+      passengerRequests: isPassengerOrBoth ? passengerRequests : undefined,
+      offers: driverOffers,
+      counterpartyLocation,
+      timestamp: Date.now(),
+    };
   };
 
   const isSubscriberAffected = (evt: {
@@ -74,8 +75,10 @@ export async function GET(req: NextRequest) {
     timestamp: number;
   }): boolean => {
     if (evt.userId === user.id) return true;
-    const myRequests =
-      isDriver ? listRequestsForDriver(user.id) : listRequestsForPassenger(user.id);
+    const driverList = isDriverOrBoth ? listRequestsForDriver(user.id) : [];
+    const passengerList = isPassengerOrBoth ? listRequestsForPassenger(user.id) : [];
+    const myRequests = [...driverList, ...passengerList];
+
     if (evt.requestId) {
       return myRequests.some((r) => r.id === evt.requestId);
     }

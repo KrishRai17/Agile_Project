@@ -1090,6 +1090,7 @@ export default function GetRidePanel({
         if (action === "accept") {
           setDriverOtpInput("");
           const reqItem = driverRequests.find((r) => r.id === requestId);
+          const targetReq = data.request || reqItem;
           const offer = data.request?.offer || publishedOffer || driverOffers[0];
           const finalDriverLat = Number(
             (
@@ -1118,16 +1119,16 @@ export default function GetRidePanel({
             "success"
           );
 
-          if (reqItem) {
+          if (targetReq) {
             onAcceptedRideRoute?.({
-              requestId: reqItem.id,
+              requestId: targetReq.id,
               driverId: user.id,
               driverName: user.name,
               driverVehicle: offer?.vehicleModel,
               driverPlate: offer?.vehicleNumber,
-              passengerId: reqItem.passengerId,
-              passengerName: reqItem.passengerName,
-              fare: offer?.farePerSeat,
+              passengerId: reqItem?.passengerId,
+              passengerName: targetReq.passengerName,
+              fare: offer?.farePerSeat || targetReq.agreedFare,
               phase: "pickup",
               tripStage: "en_route_pickup",
               driverLocation: {
@@ -1136,14 +1137,14 @@ export default function GetRidePanel({
                 name: finalDriverName,
               },
               pickupLocation: {
-                lat: reqItem.pickupLat,
-                lng: reqItem.pickupLng,
-                name: reqItem.pickup,
+                lat: targetReq.pickupLat,
+                lng: targetReq.pickupLng,
+                name: targetReq.pickup,
               },
               dropoffLocation: {
-                lat: reqItem.dropoffLat,
-                lng: reqItem.dropoffLng,
-                name: reqItem.dropoff,
+                lat: targetReq.dropoffLat,
+                lng: targetReq.dropoffLng,
+                name: targetReq.dropoff,
               },
             });
           }

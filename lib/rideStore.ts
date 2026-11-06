@@ -989,6 +989,75 @@ export function respondToRequest(
     offer = Array.from(offers.values()).find(
       (o) => o.driverId === driverId && o.status === "active" && o.seatsLeft > 0
     );
+    if (!offer) {
+      // Check if driver is a registered verified driver or both-role user in the database
+      try {
+        const db = getDb();
+        const userRow = db
+          .prepare(
+            "SELECT name, university, rating, role, student_id_verified, vehicle_type, vehicle_model, vehicle_number FROM users WHERE id = ?"
+          )
+          .get(driverId) as
+          | {
+              name: string;
+              university: string | null;
+              rating: number;
+              role: string;
+              student_id_verified: number;
+              vehicle_type: string | null;
+              vehicle_model: string | null;
+              vehicle_number: string | null;
+            }
+          | undefined;
+
+        if (
+          userRow &&
+          (userRow.role === "driver" || userRow.role === "both") &&
+          Boolean(userRow.student_id_verified)
+        ) {
+          const vType = (userRow.vehicle_type === "Car" || userRow.vehicle_type === "Scooty"
+            ? userRow.vehicle_type
+            : "Bike") as "Bike" | "Car" | "Scooty";
+          const vModel = userRow.vehicle_model || (vType === "Car" ? "Swift Dzire" : "TVS Apache");
+          const vNumber = userRow.vehicle_number || "KA 04 EK 7142";
+          const pickupName = req.pickup || "Kristu Jayanti University";
+          const dropoffName = req.dropoff || "Manyata Tech Park";
+
+          const distKm =
+            haversineKm(req.pickupLat, req.pickupLng, req.dropoffLat, req.dropoffLng) || 8.5;
+          let fareNum = 35;
+          if (vType === "Car") {
+            fareNum = Math.max(70, Math.round(40 + 9 * distKm));
+          } else if (vType === "Scooty") {
+            fareNum = Math.max(25, Math.round(12 + 4.5 * distKm));
+          } else {
+            fareNum = Math.max(30, Math.round(15 + 5 * distKm));
+          }
+
+          offer = createOffer({
+            driverId,
+            driverName: userRow.name || "Student Driver",
+            driverUniversity: userRow.university || "Kristu Jayanti University",
+            driverRating: Number(userRow.rating) || 5.0,
+            vehicleModel: vModel,
+            vehicleNumber: vNumber,
+            vehicleType: vType,
+            from: driverPosition?.name || pickupName,
+            fromLat: driverPosition?.lat ?? req.pickupLat,
+            fromLng: driverPosition?.lng ?? req.pickupLng,
+            to: dropoffName,
+            toLat: req.dropoffLat,
+            toLng: req.dropoffLng,
+            departureTime: "Immediate",
+            departureDate: new Date().toISOString().split("T")[0],
+            seats: 1,
+            farePerSeat: `₹${fareNum}`,
+          });
+        }
+      } catch (err) {
+        console.error("Failed to auto-create offer for driver:", err);
+      }
+    }
     if (!offer) return { error: "Post a ride first so passengers can see your vehicle." };
   }
 

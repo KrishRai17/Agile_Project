@@ -35,55 +35,55 @@ interface UserRow {
 const DEMO_USERS: Array<
   User & { email: string; role: "passenger" | "driver" | "both"; studentRollNumber: string; walletBalance: number }
 > = [
-  {
-    id: "usr_krish_rai_01",
-    name: "Krish Rai",
-    email: "student@hopon.demo",
-    university: "Kristu Jayanti University",
-    studentIdVerified: true,
-    studentRollNumber: "23BCAC41",
-    walletBalance: 250,
-    rating: 4.95,
-    ridesCompleted: 18,
-    role: "passenger",
-  },
-  {
-    id: "usr_driver_demo_01",
-    name: "Aarav Mehta",
-    email: "driver@hopon.demo",
-    university: "Kristu Jayanti University",
-    studentIdVerified: true,
-    studentRollNumber: "22BCOM19",
-    walletBalance: 640,
-    rating: 4.8,
-    ridesCompleted: 42,
-    role: "driver",
-  },
-  {
-    id: "usr_driver_demo_02",
-    name: "Rohan Varma",
-    email: "rohan@hopon.demo",
-    university: "Kristu Jayanti University",
-    studentIdVerified: true,
-    studentRollNumber: "23BBAA08",
-    walletBalance: 410,
-    rating: 4.9,
-    ridesCompleted: 27,
-    role: "driver",
-  },
-  {
-    id: "usr_driver_demo_03",
-    name: "Priya Nair",
-    email: "priya@hopon.demo",
-    university: "Kristu Jayanti University",
-    studentIdVerified: true,
-    studentRollNumber: "23MSCS12",
-    walletBalance: 520,
-    rating: 4.85,
-    ridesCompleted: 31,
-    role: "driver",
-  },
-];
+    {
+      id: "usr_krish_rai_01",
+      name: "Krish Rai",
+      email: "student@hopon.demo",
+      university: "Kristu Jayanti University",
+      studentIdVerified: true,
+      studentRollNumber: "23BCAC41",
+      walletBalance: 250,
+      rating: 4.95,
+      ridesCompleted: 18,
+      role: "passenger",
+    },
+    {
+      id: "usr_driver_demo_01",
+      name: "Aarav Mehta",
+      email: "driver@hopon.demo",
+      university: "Kristu Jayanti University",
+      studentIdVerified: true,
+      studentRollNumber: "22BCOM19",
+      walletBalance: 640,
+      rating: 4.8,
+      ridesCompleted: 42,
+      role: "driver",
+    },
+    {
+      id: "usr_driver_demo_02",
+      name: "Rohan Varma",
+      email: "rohan@hopon.demo",
+      university: "Kristu Jayanti University",
+      studentIdVerified: true,
+      studentRollNumber: "23BBAA08",
+      walletBalance: 410,
+      rating: 4.9,
+      ridesCompleted: 27,
+      role: "driver",
+    },
+    {
+      id: "usr_driver_demo_03",
+      name: "Priya Nair",
+      email: "priya@hopon.demo",
+      university: "Kristu Jayanti University",
+      studentIdVerified: true,
+      studentRollNumber: "23MSCS12",
+      walletBalance: 520,
+      rating: 4.85,
+      ridesCompleted: 31,
+      role: "driver",
+    },
+  ];
 
 const DEMO_EMAILS = new Set(DEMO_USERS.map((u) => u.email));
 const DEMO_USER_IDS = new Set(DEMO_USERS.map((u) => u.id));
@@ -625,14 +625,14 @@ export function getDriverVehicleInfo(userId: string): {
     )
     .get(userId) as
     | {
-        role: string;
-        student_id_verified: number;
-        vehicle_type: string | null;
-        vehicle_model: string | null;
-        vehicle_number: string | null;
-      }
+      role: string;
+      student_id_verified: number;
+      vehicle_type: string | null;
+      vehicle_model: string | null;
+      vehicle_number: string | null;
+    }
     | undefined;
-  if (!row || row.role !== "driver" || !row.student_id_verified) return null;
+  if (!row || (row.role !== "driver" && row.role !== "both") || !row.student_id_verified) return null;
   const vt = parseVehicleType(row.vehicle_type);
   if (!vt || !row.vehicle_model || !row.vehicle_number) return null;
   return {
@@ -749,9 +749,9 @@ export function submitUserRating(input: {
 
   const cleanedTags = Array.isArray(input.tags)
     ? input.tags
-        .map((t) => cleanText(t, 40))
-        .filter((t): t is string => t !== null)
-        .slice(0, 6)
+      .map((t) => cleanText(t, 40))
+      .filter((t): t is string => t !== null)
+      .slice(0, 6)
     : [];
   const tagsJson = JSON.stringify(cleanedTags);
   const cleanComment = cleanText(input.comment, 300);
@@ -785,7 +785,7 @@ export function submitUserRating(input: {
     Math.round(
       ((target.rating * baselineWeight + (stats.avg_stars ?? stars) * (stats.cnt || 1)) /
         totalCount) *
-        100
+      100
     ) / 100;
 
   db.prepare("UPDATE users SET rating = ? WHERE id = ?").run(newRating, targetUserId);

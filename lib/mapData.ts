@@ -422,6 +422,7 @@ export interface MatchingCampusRide {
   leavesIn: string;
   seatsLeft: number;
   price: number;
+  driverVerified?: boolean;
   isBestMatch?: boolean;
 }
 

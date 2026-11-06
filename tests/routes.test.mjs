@@ -160,6 +160,71 @@ test("driver stream snapshot, inbox and respond responses use toDriverView (no o
   store.cancelRequest(req.id, PASSENGER);
 });
 
+test("Fix 1: a passenger with a pending or rejected request gets no driverLocation", async () => {
+  store.updateDriverLocation(DRIVER_CAR, 13.0583, 77.6426);
+  const pendingReq = newRequest(PASSENGER, "offer_seed_001");
+  const pendingRes = await call(requestsRoute.GET, `/api/rides/requests?passengerId=${PASSENGER}`, { userId: PASSENGER });
+  assert.equal(pendingRes.status, 200);
+  const pendingData = await pendingRes.json();
+  const pendingItem = pendingData.requests.find((r) => r.id === pendingReq.id);
+  assert.ok(pendingItem);
+  assert.equal(pendingItem.driverLocation, undefined, "pending request must not expose driverLocation");
+
+  store.respondToRequest(pendingReq.id, DRIVER_CAR, "reject");
+  const rejectedRes = await call(requestsRoute.GET, `/api/rides/requests?passengerId=${PASSENGER}`, { userId: PASSENGER });
+  const rejectedData = await rejectedRes.json();
+  const rejectedItem = rejectedData.requests.find((r) => r.id === pendingReq.id);
+  assert.ok(rejectedItem);
+  assert.equal(rejectedItem.driverLocation, undefined, "rejected request must not expose driverLocation");
+
+  store.cancelRequest(pendingReq.id, PASSENGER);
+});
+
+test("Fix 2: a failed complete leaves the client UI unchanged and returns server error", async () => {
+  const invalidRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: "req_nonexistent_99999", action: "complete" },
+  });
+  assert.equal(invalidRes.status, 409);
+  const data = await invalidRes.json();
+  assert.ok(data.error);
+});
+
+test("Fix 5: registration of an unverified account issues no session cookie, verification does", async () => {
+  const email = `cookie.check.${Date.now()}@kju.edu`;
+  const regRes = await call(registerRoute.POST, "/api/auth/register", {
+    method: "POST",
+    body: { name: "Cookie Student", email, password: "password123", role: "passenger" },
+  });
+  assert.equal(regRes.status, 201);
+  const regCookie = regRes.headers.get("set-cookie");
+  assert.equal(regCookie, null, "unverified registration must NOT issue a session cookie");
+
+  const regData = await regRes.json();
+  assert.ok(regData.verificationToken);
+
+  // Now verify the account
+  const verifyRes = await call(verifyRoute.POST, "/api/auth/verify", {
+    method: "POST",
+    body: { token: regData.verificationToken },
+  });
+  assert.equal(verifyRes.status, 200);
+  const verifyCookie = verifyRes.headers.get("set-cookie");
+  assert.ok(verifyCookie && verifyCookie.includes("hopon_session="), "verification issues session cookie");
+});
+
+test("Fix 6: registration on non-localhost host does not leak verificationToken", async () => {
+  const email = `lan.check.${Date.now()}@kju.edu`;
+  const regRes = await call(registerRoute.POST, "http://192.168.1.50:3000/api/auth/register", {
+    method: "POST",
+    body: { name: "LAN Student", email, password: "password123", role: "passenger" },
+  });
+  assert.equal(regRes.status, 201);
+  const regData = await regRes.json();
+  assert.equal(regData.verificationToken, undefined, "non-localhost host must NOT leak verificationToken");
+});
+
 test("a driver cannot read another driver's inbox, and unauthenticated calls get 401", async () => {
   const forbidden = await call(requestsRoute.GET, `/api/rides/requests?driverId=${DRIVER_BIKE}`, { userId: DRIVER_CAR });
   assert.equal(forbidden.status, 403);

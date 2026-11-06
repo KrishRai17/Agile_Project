@@ -31,7 +31,14 @@ export async function GET(req: NextRequest) {
       return true;
     });
   }
-  return NextResponse.json({ offers: active });
+  const offersWithDriverVerified = active.map((o) => {
+    const driver = getUserById(o.driverId);
+    return {
+      ...o,
+      driverVerified: Boolean(driver?.studentIdVerified),
+    };
+  });
+  return NextResponse.json({ offers: offersWithDriverVerified });
 }
 
 // Only verified drivers can post offers. The driver's identity, name, university and rating come from the

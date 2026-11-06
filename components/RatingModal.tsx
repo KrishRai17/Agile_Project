@@ -32,6 +32,7 @@ export default function RatingModal({
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -46,6 +47,7 @@ export default function RatingModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
+    setErrorMessage(null);
     try {
       const res = await fetch("/api/rides/rate", {
         method: "POST",
@@ -58,17 +60,21 @@ export default function RatingModal({
           comment,
         }),
       });
-      const data = await res.json();
-      setDone(true);
-      if (res.ok && typeof data.rating === "number") {
-        onSubmitted?.(data.rating);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setDone(true);
+        if (typeof data.rating === "number") {
+          onSubmitted?.(data.rating);
+        }
+        setTimeout(() => {
+          setDone(false);
+          onClose();
+        }, 900);
+      } else {
+        setErrorMessage(data.error || "Could not submit rating.");
       }
-      setTimeout(() => {
-        setDone(false);
-        onClose();
-      }, 900);
     } catch {
-      onClose();
+      setErrorMessage("Network error. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -161,6 +167,12 @@ export default function RatingModal({
               placeholder="Optional note about your campus ride..."
               className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-800 focus:outline-none focus:bg-white focus:border-blue-600"
             />
+
+            {errorMessage && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold text-center">
+                {errorMessage}
+              </div>
+            )}
 
             <div className="flex gap-2">
               <button

@@ -297,6 +297,15 @@ export function getUserById(id: string): User | null {
   return row ? rowToUser(row) : null;
 }
 
+export function getUserByEmail(email: string): User | null {
+  ensureDemoAccountsSeeded();
+  const db = getDb();
+  const row = db
+    .prepare("SELECT * FROM users WHERE email = ?")
+    .get(email.trim().toLowerCase()) as UserRow | undefined;
+  return row ? rowToUser(row) : null;
+}
+
 export function registerUser(input: {
   name: string;
   email: string;
@@ -372,9 +381,15 @@ export function registerUser(input: {
       return { error: "An account with this email already exists." };
     }
 
-    // Existing account is UNVERIFIED: overwrite details, rotate token, and bump session_version
-    const passwordHash = hashPassword(password);
     const now = Date.now();
+    if ((existing.email_verification_expires_at ?? 0) > now) {
+      return {
+        error: "A verification email was already sent. Check your inbox or wait for it to expire.",
+      };
+    }
+
+    // Existing account is UNVERIFIED and token expired: overwrite details, rotate token, and bump session_version
+    const passwordHash = hashPassword(password);
     const initialVerifyToken = randomBytes(16).toString("base64url");
     const initialVerifyHash = hashVerificationToken(initialVerifyToken);
     const initialVerifyExpiresAt = now + EMAIL_VERIFICATION_TTL_MS;

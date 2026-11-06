@@ -113,40 +113,44 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const sessionVer = getUserSessionVersion(result.id);
-    const rememberMe = body.rememberMe !== false;
-    const token = createSessionToken(
-      result.id,
-      rememberMe ? REMEMBER_ME_SECONDS : SESSION_TTL_SECONDS,
-      undefined,
-      Date.now(),
-      sessionVer
-    );
-
-    const isHttps =
-      req.nextUrl.protocol === "https:" ||
-      req.headers.get("x-forwarded-proto")?.split(",")[0].trim() === "https";
+    const isLocalHost = ["localhost", "127.0.0.1"].includes(req.nextUrl.hostname);
 
     const response = NextResponse.json(
       {
         success: true,
         user: result,
-        verificationRequired: true,
+        verificationRequired: !result.studentIdVerified,
         emailSent,
         message,
-        ...(process.env.NODE_ENV !== "production" && !("error" in verifyIssued)
+        ...(isLocalHost && !("error" in verifyIssued)
           ? { verificationToken: verifyIssued.token }
           : {}),
       },
       { status: 201 }
     );
-    response.cookies.set(SESSION_COOKIE, token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production" && isHttps,
-      sameSite: "lax",
-      path: "/",
-      ...(rememberMe ? { maxAge: REMEMBER_ME_SECONDS } : {}),
-    });
+
+    if (result.studentIdVerified) {
+      const sessionVer = getUserSessionVersion(result.id);
+      const rememberMe = body.rememberMe !== false;
+      const token = createSessionToken(
+        result.id,
+        rememberMe ? REMEMBER_ME_SECONDS : SESSION_TTL_SECONDS,
+        undefined,
+        Date.now(),
+        sessionVer
+      );
+      const isHttps =
+        req.nextUrl.protocol === "https:" ||
+        req.headers.get("x-forwarded-proto")?.split(",")[0].trim() === "https";
+
+      response.cookies.set(SESSION_COOKIE, token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production" && isHttps,
+        sameSite: "lax",
+        path: "/",
+        ...(rememberMe ? { maxAge: REMEMBER_ME_SECONDS } : {}),
+      });
+    }
 
     return response;
   } catch (error) {

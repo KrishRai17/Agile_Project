@@ -246,62 +246,56 @@ test("registerUser creates a new SQLite user and authenticates with hashed passw
   assert.ok(stats.ratings >= 1);
 });
 
-test("account pre-hijacking fix: re-registering unverified email overwrites credentials, invalidates old token & session, and fresh token verifies", () => {
+test("account pre-hijacking fix: re-registering a pending email is refused while active, allowed when expired", () => {
   const email = `prehijack.${Date.now()}@kju.edu`;
-  // Attacker attempts to pre-register the victim's email with their own password
+  // 1. Initial registration creates unverified account with active verification TTL
   const userA = accounts.registerUser({
-    name: "Attacker",
+    name: "Initial Student",
     email,
-    password: "attackerPassword123",
+    password: "studentPassword123",
     role: "passenger",
   });
   assert.ok(!("error" in userA));
   assert.equal(userA.studentIdVerified, false);
 
-  const tokenA = accounts.createEmailVerificationToken(userA.id);
-  assert.ok(!("error" in tokenA));
-
-  // Attacker creates a session token using their session_version
-  const verA = accounts.getUserSessionVersion(userA.id);
-  const attackerSession = session.createSessionToken(userA.id, 3600, undefined, Date.now(), verA);
-  const authA = session.verifySessionToken(attackerSession);
-  assert.ok(authA);
-  assert.equal(authA.ver, verA);
-
-  // Now legitimate student arrives and registers the same email with their own password
-  const userB = accounts.registerUser({
-    name: "Real Student",
+  // 2. Re-registering while verification is pending is refused to prevent hijacking
+  const pendingAttempt = accounts.registerUser({
+    name: "Attacker Hijack",
     email,
-    password: "studentRealPassword456",
+    password: "attackerPassword456",
     role: "passenger",
   });
-  assert.ok(!("error" in userB));
-  assert.equal(userB.id, userA.id, "re-uses user ID");
-  assert.equal(userB.name, "Real Student", "overwrites name");
+  assert.ok("error" in pendingAttempt);
+  assert.equal(
+    pendingAttempt.error,
+    "A verification email was already sent. Check your inbox or wait for it to expire."
+  );
 
-  // 1. Old attacker password fails to authenticate
-  assert.equal(accounts.authenticate(email, "attackerPassword123"), null, "old password rejected");
-  // 2. New student password succeeds
-  const authedB = accounts.authenticate(email, "studentRealPassword456");
-  assert.ok(authedB, "new password authenticates");
-  assert.equal(authedB.name, "Real Student");
+  // 3. Simulate token expiration in DB
+  const dbConn = db.getDb();
+  dbConn.prepare("UPDATE users SET email_verification_expires_at = ? WHERE email = ?").run(
+    Date.now() - 1000,
+    email
+  );
 
-  // 3. Old attacker session version is now stale
-  const currentVer = accounts.getUserSessionVersion(userA.id);
-  assert.ok(currentVer > verA, "session version was bumped");
-  assert.notEqual(authA.ver, currentVer, "attacker session ver is outdated");
+  // 4. Now that the token is expired, re-registration succeeds and refreshes credentials
+  const refreshed = accounts.registerUser({
+    name: "Refreshed Student",
+    email,
+    password: "refreshedPassword789",
+    role: "passenger",
+  });
+  assert.ok(!("error" in refreshed));
+  assert.equal(refreshed.id, userA.id, "re-uses user ID");
+  assert.equal(refreshed.name, "Refreshed Student");
 
-  // 4. Old verification tokenA fails to verify
-  const oldVerify = accounts.verifyEmailToken(tokenA.token);
-  assert.ok("error" in oldVerify, "old verification token rejected");
-
-  // 5. Fresh verification token verifies successfully
-  const tokenB = accounts.createEmailVerificationToken(userB.id);
-  assert.ok(!("error" in tokenB));
-  const newVerify = accounts.verifyEmailToken(tokenB.token);
-  assert.ok(!("error" in newVerify));
-  assert.equal(newVerify.user.studentIdVerified, true);
-  assert.equal(newVerify.user.walletBalance, 250);
+  // 5. Verification succeeds with new token
+  const token = accounts.createEmailVerificationToken(refreshed.id);
+  assert.ok(!("error" in token));
+  const verified = accounts.verifyEmailToken(token.token);
+  assert.ok(!("error" in verified));
+  assert.equal(verified.user.studentIdVerified, true);
+  assert.equal(verified.user.walletBalance, 250);
 
   // 6. Once verified, further duplicate registration attempts are blocked
   const dupBlocked = accounts.registerUser({

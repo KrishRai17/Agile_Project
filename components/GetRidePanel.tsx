@@ -277,6 +277,7 @@ export default function GetRidePanel({
             departureTime?: string;
             seatsLeft: number;
             farePerSeat?: string | number;
+            driverVerified?: boolean;
           }, idx: number) => ({
             id: o.id,
             driverId: o.driverId,
@@ -288,6 +289,7 @@ export default function GetRidePanel({
             leavesIn: o.departureTime === "Immediate" ? "Immediate" : "5 min",
             seatsLeft: Number(o.seatsLeft) ?? 1,
             price: Number(o.farePerSeat) || 35,
+            driverVerified: Boolean(o.driverVerified),
             isBestMatch: idx === 0,
           }));
 
@@ -2643,9 +2645,14 @@ export default function GetRidePanel({
                         <span className="font-bold text-slate-900 text-xs sm:text-sm">
                           {ride.driverName}
                         </span>
-                        <span className="w-3.5 h-3.5 rounded-full bg-sky-500 text-white flex items-center justify-center text-[9px] font-bold">
-                          ✓
-                        </span>
+                        {ride.driverVerified && (
+                          <span
+                            className="w-3.5 h-3.5 rounded-full bg-sky-500 text-white flex items-center justify-center text-[9px] font-bold"
+                            title="Verified Campus Member"
+                          >
+                            ✓
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs sm:text-sm font-extrabold text-slate-900">
                         ₹{ride.price} <span className="text-[10px] font-normal text-slate-500">per seat</span>
@@ -2705,7 +2712,9 @@ export default function GetRidePanel({
               onChange={(e) => setPaymentMethod(e.target.value as "wallet" | "upi" | "cash")}
               className="bg-slate-100 rounded-lg px-2 py-1 font-semibold text-slate-900 focus:outline-none cursor-pointer"
             >
-              <option value="wallet">HopOn Wallet (₹250)</option>
+              <option value="wallet">
+                HopOn Wallet (₹{Number(user?.walletBalance ?? 0).toFixed(2)})
+              </option>
               <option value="upi">UPI (GPay / PhonePe)</option>
               <option value="cash">Cash to Student</option>
             </select>

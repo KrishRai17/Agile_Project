@@ -214,7 +214,7 @@ export default function HopOnNavbar({
                       <Wallet className="w-4 h-4 text-blue-600" />
                       <span>Student Wallet</span>
                     </div>
-                    <span className="text-xs font-bold text-blue-600">₹150.00</span>
+                    <span className="text-xs font-bold text-blue-600">₹{Number(user.walletBalance ?? 0).toFixed(2)}</span>
                   </div>
 
                   {/* Actions */}

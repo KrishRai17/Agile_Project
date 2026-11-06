@@ -7,6 +7,7 @@ import {
   listRequestsForPassenger,
   getOffer,
   getDriverLocation,
+  canViewDriverLocation,
   toDriverView,
 } from "@/lib/rideStore";
 import { readJsonObject, requireUser, tooManyRequests } from "@/lib/apiAuth";
@@ -42,10 +43,13 @@ export async function GET(req: NextRequest) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { declinedBy, ...cleanReq } = r;
       const offer = r.offerId ? getOffer(r.offerId) : undefined;
+      const visible = Boolean(
+        offer && r.status === "accepted" && canViewDriverLocation(user.id, offer.driverId)
+      );
       return {
         ...cleanReq,
         offer,
-        driverLocation: offer ? getDriverLocation(offer.driverId) : undefined,
+        driverLocation: visible && offer ? getDriverLocation(offer.driverId) : undefined,
       };
     });
     return NextResponse.json({ requests });

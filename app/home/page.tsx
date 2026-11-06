@@ -606,19 +606,21 @@ export default function HomePage() {
           rideSnapshot.driverId === user?.id ||
           (user?.role === "driver" && rideSnapshot.passengerId !== user?.id);
         const counterpartyId = isUserDriver
-          ? rideSnapshot.passengerId || "passenger_demo"
-          : rideSnapshot.driverId || "driver_rohan";
+          ? rideSnapshot.passengerId
+          : rideSnapshot.driverId;
         const counterpartyName = isUserDriver
           ? rideSnapshot.passengerName || "Student Passenger"
           : rideSnapshot.driverName || "Student Driver";
 
-        setRatingTarget({
-          requestId: reqId,
-          targetUserId: counterpartyId,
-          targetName: counterpartyName,
-          targetRole: isUserDriver ? "passenger" : "driver",
-          fare: rideSnapshot.fare || "75",
-        });
+        if (counterpartyId) {
+          setRatingTarget({
+            requestId: reqId,
+            targetUserId: counterpartyId,
+            targetName: counterpartyName,
+            targetRole: isUserDriver ? "passenger" : "driver",
+            fare: rideSnapshot.fare || "0",
+          });
+        }
       } else {
         showToast("Ride Cancelled", "This ride was cancelled.", "info");
       }
@@ -1145,8 +1147,18 @@ export default function HomePage() {
               <div className="mt-5 space-y-3">
                 <button
                   type="button"
-                  onClick={() => {
-                    showToast("Trip Link Copied", "Shareable tracking link copied to clipboard.", "success");
+                  onClick={async () => {
+                    if (!activeAcceptedRide?.requestId) {
+                      showToast("No Active Ride", "Start or accept a ride before sharing your trip link.", "info");
+                      return;
+                    }
+                    const url = `${window.location.origin}/home?track=${activeAcceptedRide.requestId}`;
+                    try {
+                      await navigator.clipboard.writeText(url);
+                      showToast("Trip Link Copied", "Shareable tracking link copied to clipboard.", "success");
+                    } catch {
+                      showToast("Share Trip", url, "info");
+                    }
                   }}
                   className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-50 border border-sky-200 text-slate-800 text-xs font-bold shadow-2xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
                 >

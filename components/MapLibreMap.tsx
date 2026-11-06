@@ -439,11 +439,13 @@ export default function MapLibreMap({
   );
   const [hudOtpInput, setHudOtpInput] = useState("");
   const [hudVerifyingOtp, setHudVerifyingOtp] = useState(false);
+  const [isHudHidden, setIsHudHidden] = useState(false);
   const [prevRouteReqId, setPrevRouteReqId] = useState<string | undefined>(acceptedRideRoute?.requestId);
   if (acceptedRideRoute?.requestId !== prevRouteReqId) {
     setPrevRouteReqId(acceptedRideRoute?.requestId);
     setLocalPhase(acceptedRideRoute?.phase ?? "pickup");
     setHudOtpInput("");
+    setIsHudHidden(false);
     if (!acceptedRideRoute) {
       setAcceptedRouteDetails(null);
     }
@@ -1416,7 +1418,16 @@ export default function MapLibreMap({
       </div>
 
       {/* Accepted Ride Floating HUD Overlay */}
-      {acceptedRideRoute && (
+      {acceptedRideRoute && isHudHidden && (
+        <button
+          type="button"
+          onClick={() => setIsHudHidden(false)}
+          className="absolute top-4 left-4 z-30 bg-white/95 hover:bg-white text-slate-800 text-xs font-bold px-3 py-2 rounded-xl shadow-lg border border-slate-200 flex items-center gap-1.5 transition-all cursor-pointer"
+        >
+          <span>🚗 Show Ride HUD</span>
+        </button>
+      )}
+      {acceptedRideRoute && !isHudHidden && (
         <div className="absolute top-4 left-4 right-4 sm:right-auto sm:max-w-md z-30 bg-white/95 backdrop-blur-md rounded-2xl p-4 shadow-xl border border-slate-200 animate-in slide-in-from-top-3 duration-200">
           {/* Header with Phase Badge & Close Button */}
           <div className="flex items-center justify-between pb-2 mb-2.5 border-b border-slate-100">
@@ -1446,16 +1457,26 @@ export default function MapLibreMap({
                   : "🏁 Stage 2/2: En Route to Destination"}
               </span>
             </div>
-            {onClearAcceptedRoute && (
+            <div className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={() => onClearAcceptedRoute()}
-                className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 text-[11px] font-bold px-2 py-0.5 rounded-md cursor-pointer transition-colors"
-                title="Cancel this ride"
+                onClick={() => setIsHudHidden(true)}
+                className="text-slate-500 hover:text-slate-800 hover:bg-slate-100 text-[11px] font-bold px-2 py-0.5 rounded-md cursor-pointer transition-colors"
+                title="Hide HUD from view"
               >
-                Cancel Ride ✕
+                Hide ✕
               </button>
-            )}
+              {onClearAcceptedRoute && (
+                <button
+                  type="button"
+                  onClick={() => onClearAcceptedRoute()}
+                  className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 text-[11px] font-bold px-2 py-0.5 rounded-md cursor-pointer transition-colors"
+                  title="Cancel this ride"
+                >
+                  Cancel Ride
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Phase Switcher Tabs */}

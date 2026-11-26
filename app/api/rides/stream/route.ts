@@ -80,6 +80,10 @@ export async function GET(req: NextRequest) {
     const myRequests = [...driverList, ...passengerList];
 
     if (evt.requestId) {
+      if (isDriverOrBoth && evt.type === "request") {
+        // Also notify drivers when an open request is accepted by another driver or cancelled by the passenger
+        return true;
+      }
       return myRequests.some((r) => r.id === evt.requestId);
     }
     if (evt.type === "location" && evt.userId) {

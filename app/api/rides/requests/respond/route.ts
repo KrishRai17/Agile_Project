@@ -4,6 +4,7 @@ import {
   markDriverArrived,
   verifyRideOtp,
   completeRide,
+  confirmPayment,
   getDriverLocation,
   toDriverView,
 } from "@/lib/rideStore";
@@ -12,7 +13,7 @@ import { limiters } from "@/lib/limiters";
 import { cleanText, isValidLatLng } from "@/lib/validate";
 
 // PATCH /api/rides/requests/respond
-// body: { requestId, action: "accept" | "reject" | "arrive" | "verify_otp" | "complete", otp?: string, driverLat?: number, driverLng?: number, driverLocationName?: string }
+// body: { requestId, action: "accept" | "reject" | "arrive" | "verify_otp" | "complete" | "confirm_payment", otp?: string, driverLat?: number, driverLng?: number, driverLocationName?: string }
 // Only signed-in drivers can respond, and always as themselves (any driverId in the body is ignored).
 export async function PATCH(req: NextRequest) {
   const auth = requireUser(req, "driver");
@@ -37,10 +38,11 @@ export async function PATCH(req: NextRequest) {
       action !== "reject" &&
       action !== "arrive" &&
       action !== "verify_otp" &&
-      action !== "complete"
+      action !== "complete" &&
+      action !== "confirm_payment"
     ) {
       return NextResponse.json(
-        { error: "action must be 'accept', 'reject', 'arrive', 'verify_otp', or 'complete'." },
+        { error: "action must be 'accept', 'reject', 'arrive', 'verify_otp', 'complete', or 'confirm_payment'." },
         { status: 400 }
       );
     }
@@ -63,6 +65,8 @@ export async function PATCH(req: NextRequest) {
         ? verifyRideOtp(requestId, auth.user.id, typeof body.otp === "string" ? body.otp : "")
         : action === "complete"
         ? completeRide(requestId, auth.user.id)
+        : action === "confirm_payment"
+        ? confirmPayment(requestId, auth.user.id)
         : respondToRequest(requestId, auth.user.id, action, driverPosition);
 
     if ("error" in result) {
@@ -83,7 +87,16 @@ export async function PATCH(req: NextRequest) {
 
     const driverLocation = getDriverLocation(auth.user.id);
     const driverView = toDriverView(result);
-    return NextResponse.json({ request: driverView, driverLocation });
+    return NextResponse.json({
+      success: true,
+      request: driverView,
+      driverLocation,
+      paymentMethod: driverView.paymentMethod,
+      paymentStatus: driverView.paymentStatus,
+      amountRupees: driverView.amountRupees,
+      ...(driverView.upiUri ? { upiUri: driverView.upiUri } : {}),
+      ...(driverView.driverQrImage ? { driverQrImage: driverView.driverQrImage } : {}),
+    });
   } catch (err) {
     console.error("PATCH /api/rides/requests/respond error:", err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

@@ -87,7 +87,11 @@ export function parseSeats(value: unknown, type: VehicleType): number | null {
 
 /** Whole-rupee fare between 0 and MAX_FARE, returned as a string (the store keeps fares as strings). */
 export function parseFare(value: unknown): string | null {
-  const n = toNumber(value);
+  const normalized =
+    typeof value === "string"
+      ? value.trim().replace(/^₹\s*/i, "").replace(/,/g, "")
+      : value;
+  const n = toNumber(normalized);
   if (n === null || n < 0 || n > MAX_FARE) return null;
   return String(Math.round(n));
 }
@@ -109,4 +113,37 @@ export function parseOptionalNumber(value: unknown, min: number, max: number): n
   if (value === undefined || value === null) return undefined;
   const n = toNumber(value);
   return n !== null && n >= min && n <= max ? n : null;
+}
+
+export const PAYMENT_METHODS = ["wallet", "upi"] as const;
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+
+/** Validates and cleans a UPI ID / VPA (e.g. "student@okaxis"). Lowercase, trimmed. */
+export function cleanUpiId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return /^[a-zA-Z0-9.\-_]{2,64}@[a-zA-Z]{2,32}$/.test(trimmed) ? trimmed : null;
+}
+
+/** Validates a base64 data URL for an uploaded UPI QR image (PNG/JPEG/WebP, <= ~500 KB). */
+export function cleanUpiQrImage(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 750_000) return null;
+  if (!/^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+/** Parses paymentMethod. Defaults to "wallet" if missing, returns null for unknown values. */
+export function parsePaymentMethod(value: unknown): PaymentMethod | null {
+  if (value === undefined || value === null || value === "") return "wallet";
+  if (typeof value === "string") {
+    const lower = value.trim().toLowerCase();
+    if ((PAYMENT_METHODS as readonly string[]).includes(lower)) {
+      return lower as PaymentMethod;
+    }
+  }
+  return null;
 }

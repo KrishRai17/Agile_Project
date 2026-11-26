@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS users (
   email_verification_hash TEXT,
   email_verification_expires_at INTEGER,
   session_version INTEGER NOT NULL DEFAULT 1,
+  upi_id TEXT,
+  upi_qr_image TEXT,
+  avatar_url TEXT,
   created_at INTEGER NOT NULL
 );
 
@@ -107,6 +110,9 @@ CREATE TABLE IF NOT EXISTS ride_requests (
   arrived_at INTEGER,
   started_at INTEGER,
   completed_at INTEGER,
+  payment_method TEXT NOT NULL DEFAULT 'wallet',
+  payment_status TEXT NOT NULL DEFAULT 'none',
+  payment_marked_at INTEGER,
   created_at INTEGER NOT NULL,
   responded_at INTEGER
 );
@@ -220,6 +226,15 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
   if (!names.has("session_version")) {
     db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1");
   }
+  if (!names.has("upi_id")) {
+    db.exec("ALTER TABLE users ADD COLUMN upi_id TEXT");
+  }
+  if (!names.has("upi_qr_image")) {
+    db.exec("ALTER TABLE users ADD COLUMN upi_qr_image TEXT");
+  }
+  if (!names.has("avatar_url")) {
+    db.exec("ALTER TABLE users ADD COLUMN avatar_url TEXT");
+  }
 
   // Widen role CHECK constraint to include 'both' if existing DB table was created with only ('passenger', 'driver')
   const userTableSqlRow = db
@@ -243,6 +258,8 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
         vehicle_model TEXT,
         vehicle_number TEXT,
         vehicle_type TEXT,
+        upi_id TEXT,
+        upi_qr_image TEXT,
         email_verification_hash TEXT,
         email_verification_expires_at INTEGER,
         session_version INTEGER NOT NULL DEFAULT 1,
@@ -251,13 +268,13 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
       INSERT INTO users_new (
         id, name, email, password_hash, university, student_id_verified,
         student_roll_number, wallet_balance, rating, rides_completed, role,
-        vehicle_model, vehicle_number, vehicle_type,
+        vehicle_model, vehicle_number, vehicle_type, upi_id, upi_qr_image,
         email_verification_hash, email_verification_expires_at, session_version, created_at
       )
       SELECT
         id, name, email, password_hash, university, student_id_verified,
         student_roll_number, wallet_balance, rating, rides_completed, role,
-        vehicle_model, vehicle_number, vehicle_type,
+        vehicle_model, vehicle_number, vehicle_type, upi_id, upi_qr_image,
         email_verification_hash, email_verification_expires_at,
         COALESCE(session_version, 1), created_at
       FROM users;
@@ -304,6 +321,15 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
   if (!reqNames.has("completed_at")) {
     db.exec("ALTER TABLE ride_requests ADD COLUMN completed_at INTEGER");
   }
+  if (!reqNames.has("payment_method")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'wallet'");
+  }
+  if (!reqNames.has("payment_status")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'none'");
+  }
+  if (!reqNames.has("payment_marked_at")) {
+    db.exec("ALTER TABLE ride_requests ADD COLUMN payment_marked_at INTEGER");
+  }
 
   const tableSqlRow = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ride_requests'")
@@ -335,6 +361,9 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
         arrived_at INTEGER,
         started_at INTEGER,
         completed_at INTEGER,
+        payment_method TEXT NOT NULL DEFAULT 'wallet',
+        payment_status TEXT NOT NULL DEFAULT 'none',
+        payment_marked_at INTEGER,
         created_at INTEGER NOT NULL,
         responded_at INTEGER
       );
@@ -342,13 +371,17 @@ function ensureUserColumns(db: BetterSqlite3.Database): void {
         id, offer_id, declined_by, passenger_id, passenger_name, passenger_rating,
         pickup, pickup_lat, pickup_lng, dropoff, dropoff_lat, dropoff_lng,
         status, note, agreed_fare, otp, otp_attempts, otp_locked_until, share_token,
-        trip_stage, arrived_at, started_at, completed_at, created_at, responded_at
+        trip_stage, arrived_at, started_at, completed_at,
+        payment_method, payment_status, payment_marked_at,
+        created_at, responded_at
       )
       SELECT
         id, offer_id, declined_by, passenger_id, passenger_name, passenger_rating,
         pickup, pickup_lat, pickup_lng, dropoff, dropoff_lat, dropoff_lng,
         status, note, agreed_fare, otp, otp_attempts, otp_locked_until, share_token,
-        trip_stage, arrived_at, started_at, completed_at, created_at, responded_at
+        trip_stage, arrived_at, started_at, completed_at,
+        COALESCE(payment_method, 'wallet'), COALESCE(payment_status, 'none'), payment_marked_at,
+        created_at, responded_at
       FROM ride_requests;
       DROP TABLE ride_requests;
       ALTER TABLE ride_requests_new RENAME TO ride_requests;

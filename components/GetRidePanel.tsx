@@ -27,6 +27,7 @@ import {
   Share2,
   MessageSquare,
   ShieldAlert,
+  Star,
 } from "lucide-react";
 import {
   BENGALURU_LOCATIONS,
@@ -108,6 +109,18 @@ interface GetRidePanelProps {
   onSelectMatchingRide?: (ride: MatchingCampusRide | null) => void;
   onRequestSeatRef?: React.MutableRefObject<((ride?: MatchingCampusRide) => Promise<void>) | null>;
   onSearchingRidesChange?: (isSearching: boolean) => void;
+  onMatchingRidesCountChange?: (count: number) => void;
+  onPassengerRideCompleted?: (details: {
+    requestId: string;
+    driverId: string;
+    driverName: string;
+    vehicleModel?: string;
+    vehicleNumber?: string;
+    pickup: string;
+    dropoff: string;
+    fare: string;
+    paymentMethod?: "wallet" | "upi";
+  }) => void;
 }
 
 export default function GetRidePanel({
@@ -131,6 +144,8 @@ export default function GetRidePanel({
   onSelectMatchingRide,
   onRequestSeatRef,
   onSearchingRidesChange,
+  onMatchingRidesCountChange,
+  onPassengerRideCompleted,
 }: GetRidePanelProps) {
   const { showToast } = useToast();
   const {
@@ -272,6 +287,7 @@ export default function GetRidePanel({
             driverId: string;
             driverName: string;
             driverRating?: number;
+            vehicleType?: "Bike" | "Scooty" | "Car";
             vehicleModel?: string;
             vehicleNumber?: string;
             departureTime?: string;
@@ -283,6 +299,7 @@ export default function GetRidePanel({
             driverId: o.driverId,
             driverName: o.driverName,
             driverRating: Number(o.driverRating) || 4.9,
+            vehicleType: o.vehicleType,
             vehicleModel: o.vehicleModel || "Campus Vehicle",
             vehicleNumber: o.vehicleNumber || "KA 04 MP 1180",
             departureTime: o.departureTime || "Immediate",
@@ -295,6 +312,7 @@ export default function GetRidePanel({
 
           if (!cancelled) {
             setMatchingRides(mapped);
+            onMatchingRidesCountChange?.(mapped.length);
             if (mapped.length > 0) {
               setInternalSelectedRide((prev) => {
                 const match = mapped.find((m) => m.id === prev?.id);
@@ -330,7 +348,7 @@ export default function GetRidePanel({
       clearInterval(interval);
       window.removeEventListener("focus", onWindowFocus);
     };
-  }, [onSelectMatchingRide, activeTab]);
+  }, [onSelectMatchingRide, onMatchingRidesCountChange, activeTab]);
 
   // Schedule modal / toggle
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
@@ -346,9 +364,20 @@ export default function GetRidePanel({
     },
     [onSearchingRidesChange]
   );
-  const [selectedRideId] = useState<string>("hopon-bike");
-  const [paymentMethod, setPaymentMethod] = useState<"wallet" | "upi" | "cash">("wallet");
+  const [selectedRideId, setSelectedRideId] = useState<"hopon-bike" | "hopon-scooty" | "hopon-car">("hopon-bike");
+  const [paymentMethod] = useState<"wallet" | "upi">("upi");
   const [bookingConfirmed, setBookingConfirmed] = useState(false);
+  const [completedTripSummary, setCompletedTripSummary] = useState<{
+    requestId: string;
+    driverId: string;
+    driverName: string;
+    vehicleModel?: string;
+    vehicleNumber?: string;
+    pickup: string;
+    dropoff: string;
+    fare: string;
+    paymentMethod?: "wallet" | "upi";
+  } | null>(null);
 
   // The driver who accepted this passenger's request (set once a driver accepts)
   const [assignedOffer, setAssignedOffer] = useState<RideOffer | null>(null);
@@ -681,7 +710,9 @@ export default function GetRidePanel({
               driverPlate: offer?.vehicleNumber,
               passengerId: user.id,
               passengerName: user.name,
-              fare: offer?.farePerSeat,
+              fare: req.agreedFare ?? offer?.farePerSeat,
+              paymentMethod: req.paymentMethod,
+              paymentStatus: req.paymentStatus,
               phase,
               tripStage: stage,
               otp: req.otp,
@@ -730,7 +761,20 @@ export default function GetRidePanel({
           setPassengerOtp(null);
           setPassengerTripStage("en_route_pickup");
           if (req.status === "completed") {
-            showToast("Ride Completed! 🎉", `You have reached ${req.dropoff}.`, "success");
+            const summary = {
+              requestId: req.id,
+              driverId: req.offer?.driverId || "",
+              driverName: req.offer?.driverName || "Student Driver",
+              vehicleModel: req.offer?.vehicleModel,
+              vehicleNumber: req.offer?.vehicleNumber,
+              pickup: req.pickup,
+              dropoff: req.dropoff,
+              fare: req.agreedFare || req.offer?.farePerSeat || "0",
+              paymentMethod: req.paymentMethod,
+            };
+            setCompletedTripSummary(summary);
+            onPassengerRideCompleted?.(summary);
+            showToast("Ride Completed! 🎉", `You have reached ${req.dropoff}. Please rate your driver!`, "success");
           } else {
             showToast("Ride Cancelled", "This ride was cancelled.", "info");
           }
@@ -795,6 +839,7 @@ export default function GetRidePanel({
           dropoffLat: resolvedDropoffCoords.lat,
           dropoffLng: resolvedDropoffCoords.lng,
           note: noteParts.join(" · "),
+          paymentMethod,
         }),
       });
       const data = await res.json();
@@ -875,7 +920,9 @@ export default function GetRidePanel({
             driverPlate: offer?.vehicleNumber,
             passengerId: user.id,
             passengerName: user.name,
-            fare: offer?.farePerSeat,
+            fare: active.agreedFare ?? offer?.farePerSeat,
+            paymentMethod: active.paymentMethod,
+            paymentStatus: active.paymentStatus,
             phase,
             tripStage: stage,
             otp: active.otp,
@@ -2202,6 +2249,73 @@ export default function GetRidePanel({
     );
   }
 
+  // POST-RIDE COMPLETED VIEW FOR PASSENGER
+  if (completedTripSummary) {
+    return (
+      <div className="w-full bg-white rounded-3xl p-5 sm:p-6 shadow-xl shadow-slate-200/50 border border-emerald-200 flex flex-col gap-4 animate-in fade-in duration-200">
+        <div className="flex items-center gap-3">
+          <div className="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-6 h-6" />
+          </div>
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700">
+              TRIP COMPLETED
+            </span>
+            <h2 className="text-lg font-black text-slate-900">Ride Completed! 🎉</h2>
+          </div>
+        </div>
+
+        <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2 text-xs">
+          <div className="flex items-center gap-2 text-slate-800">
+            <span className="w-2.5 h-2.5 rounded-full bg-blue-600 shrink-0" />
+            <span className="font-semibold truncate">{completedTripSummary.pickup}</span>
+          </div>
+          <div className="flex items-center gap-2 text-slate-800">
+            <span className="w-2.5 h-2.5 rounded-xs bg-indigo-600 shrink-0" />
+            <span className="font-semibold truncate">{completedTripSummary.dropoff}</span>
+          </div>
+          <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between text-slate-600">
+            <span>Driver</span>
+            <span className="font-bold text-slate-900">
+              {completedTripSummary.driverName}
+              {completedTripSummary.vehicleModel ? ` · ${completedTripSummary.vehicleModel}` : ""}
+            </span>
+          </div>
+          {completedTripSummary.vehicleNumber && (
+            <div className="flex items-center justify-between text-slate-600">
+              <span>Vehicle No.</span>
+              <span className="font-mono font-bold text-slate-900">{completedTripSummary.vehicleNumber}</span>
+            </div>
+          )}
+          <div className="flex items-center justify-between text-slate-600">
+            <span>Fare ({completedTripSummary.paymentMethod === "upi" ? "UPI" : "Wallet"})</span>
+            <span className="font-extrabold text-emerald-700">
+              ₹{completedTripSummary.fare.replace(/^₹/, "")}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => onPassengerRideCompleted?.(completedTripSummary)}
+            className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-sm shadow-md transition-all cursor-pointer flex items-center justify-center gap-2"
+          >
+            <Star className="w-4 h-4 fill-amber-300 text-amber-300" />
+            <span>Rate &amp; Give Feedback</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setCompletedTripSummary(null)}
+            className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+          >
+            Book Another Ride
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // POST-SEARCH / VEHICLE SELECTION VIEW (NO DISCOUNT, LOGIN THEME)
   if (isSearchingRides) {
     if (bookingConfirmed) {
@@ -2272,7 +2386,7 @@ export default function GetRidePanel({
                 </p>
                 <div className="flex items-center justify-between pt-1.5 border-t border-slate-200/70 text-xs text-slate-600">
                   <span>Agreed upfront fare:</span>
-                  <span className="font-bold text-slate-900">₹{fareAmount} (HopOn Wallet)</span>
+                  <span className="font-bold text-slate-900">₹{fareAmount} (UPI)</span>
                 </div>
               </div>
 
@@ -2280,10 +2394,28 @@ export default function GetRidePanel({
               <div className="space-y-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    const shareUrl = `${window.location.origin}/track/${activeRequestId || "live"}`;
-                    navigator.clipboard.writeText(shareUrl).catch(() => {});
-                    showToast("Trip Link Copied! 🔗", "Shareable live tracking link copied to clipboard.", "success");
+                  onClick={async () => {
+                    if (!activeRequestId) {
+                      showToast("No Active Ride", "Wait until your ride is active before sharing.", "info");
+                      return;
+                    }
+                    try {
+                      const res = await fetch("/api/rides/track", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ requestId: activeRequestId }),
+                      });
+                      const data = await res.json().catch(() => ({}));
+                      if (!res.ok || !data.sharePath) {
+                        showToast("Could Not Share Trip", data.error || "Unable to generate share link.", "error");
+                        return;
+                      }
+                      const shareUrl = `${window.location.origin}${data.sharePath}`;
+                      await navigator.clipboard.writeText(shareUrl);
+                      showToast("Trip Link Copied! 🔗", "Shareable live tracking link copied to clipboard.", "success");
+                    } catch {
+                      showToast("Could Not Share Trip", "Failed to copy tracking link.", "error");
+                    }
                   }}
                   className="w-full py-2.5 px-4 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
                 >
@@ -2612,6 +2744,53 @@ export default function GetRidePanel({
           </div>
         </div>
 
+        {/* Choose Vehicle Type: Bike, Scooters, Motors */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-600">
+              Choose Vehicle
+            </span>
+            <span className="text-[11px] text-slate-400 font-medium">
+              Est. {distanceKm.toFixed(1)} km
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {(
+              [
+                { id: "hopon-bike", label: "Bike", emoji: "🏍️", vType: "Bike" as const },
+                { id: "hopon-scooty", label: "Scooter", emoji: "🛵", vType: "Scooty" as const },
+                { id: "hopon-car", label: "Motors", emoji: "🚗", vType: "Car" as const },
+              ] as const
+            ).map((opt) => {
+              const optPrice = rideOptions.find((r) => r.id === opt.id)?.price ?? 35;
+              const isSelected = selectedRideId === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedRideId(opt.id);
+                    const matchingForType = matchingRides.find((m) => m.vehicleType === opt.vType);
+                    if (matchingForType) {
+                      setInternalSelectedRide(matchingForType);
+                      onSelectMatchingRide?.(matchingForType);
+                    }
+                  }}
+                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center gap-0.5 ${
+                    isSelected
+                      ? "border-2 border-[#27a8f5] bg-sky-50/40 shadow-xs ring-2 ring-sky-400/20"
+                      : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                  }`}
+                >
+                  <span className="text-lg leading-none">{opt.emoji}</span>
+                  <span className="text-xs font-bold text-slate-900 mt-1">{opt.label}</span>
+                  <span className="text-[11px] font-extrabold text-[#0284c7]">₹{optPrice}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Matching Rides on Your Route List */}
         {matchingRides.length > 0 ? (
           <div className="space-y-2 mt-1">
@@ -2702,23 +2881,18 @@ export default function GetRidePanel({
           </div>
         )}
 
-        {/* Payment Method Selector */}
+        {/* Payment Method Info (UPI only on passenger side) */}
         <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
           <div className="flex items-center gap-2 text-slate-700">
             <CreditCard className="w-4 h-4 text-blue-600" />
             <span className="font-semibold">Payment:</span>
-            <select
-              value={paymentMethod}
-              onChange={(e) => setPaymentMethod(e.target.value as "wallet" | "upi" | "cash")}
-              className="bg-slate-100 rounded-lg px-2 py-1 font-semibold text-slate-900 focus:outline-none cursor-pointer"
-            >
-              <option value="wallet">
-                HopOn Wallet (₹{Number(user?.walletBalance ?? 0).toFixed(2)})
-              </option>
-              <option value="upi">UPI (GPay / PhonePe)</option>
-              <option value="cash">Cash to Student</option>
-            </select>
+            <span className="bg-slate-100 rounded-lg px-2.5 py-1 font-semibold text-slate-900">
+              UPI (GPay / PhonePe / Paytm)
+            </span>
           </div>
+          <span className="text-[11px] text-emerald-600 font-semibold">
+            Scan rider QR at dropoff
+          </span>
         </div>
 
         {/* Request Ride CTA */}
@@ -2734,7 +2908,13 @@ export default function GetRidePanel({
               ? "Sending Request…"
               : activeMatchingRide
               ? `Request Seat · ₹${activeMatchingRide.price}`
-              : "Put Up Ride Request"}
+              : `Request ${
+                  selectedRideId === "hopon-bike"
+                    ? "Bike"
+                    : selectedRideId === "hopon-scooty"
+                    ? "Scooter"
+                    : "Motors"
+                } · ₹${selectedRide.price}`}
           </span>
         </button>
       </div>
@@ -2805,6 +2985,7 @@ export default function GetRidePanel({
                 type="text"
                 value={pickupText}
                 onFocus={() => setActiveInputFocus("pickup")}
+                onBlur={() => setTimeout(() => setActiveInputFocus((prev) => (prev === "pickup" ? null : prev)), 180)}
                 onChange={(e) => {
                   setPickupText(e.target.value);
                   setActiveInputFocus("pickup");
@@ -2925,6 +3106,7 @@ export default function GetRidePanel({
                 type="text"
                 value={dropoffText}
                 onFocus={() => setActiveInputFocus("dropoff")}
+                onBlur={() => setTimeout(() => setActiveInputFocus((prev) => (prev === "dropoff" ? null : prev)), 180)}
                 onChange={(e) => {
                   setDropoffText(e.target.value);
                   setActiveInputFocus("dropoff");

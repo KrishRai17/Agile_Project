@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   createEmailVerificationToken,
   getDriverVehicleInfo,
-  getUserByEmail,
   getUserSessionVersion,
   verifyEmailToken,
 } from "@/lib/accounts";
@@ -29,18 +28,11 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "resend") {
-      let targetUser = null;
-      if (typeof body.email === "string" && body.email.trim()) {
-        targetUser = getUserByEmail(body.email.trim().toLowerCase());
-      } else {
-        const auth = requireUser(req);
-        if (!("response" in auth)) {
-          targetUser = auth.user;
-        }
+      const auth = requireUser(req);
+      if ("response" in auth) {
+        return auth.response;
       }
-      if (!targetUser) {
-        return NextResponse.json({ error: "Account not found or session expired." }, { status: 404 });
-      }
+      const targetUser = auth.user;
       if (targetUser.studentIdVerified) {
         return NextResponse.json({
           success: true,

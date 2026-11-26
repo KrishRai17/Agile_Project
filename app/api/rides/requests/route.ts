@@ -13,7 +13,7 @@ import {
 import { readJsonObject, requireUser, tooManyRequests } from "@/lib/apiAuth";
 import { KJU_COORDS, MANYATA_COORDS } from "@/lib/campus";
 import { limiters } from "@/lib/limiters";
-import { cleanText, resolveCoords } from "@/lib/validate";
+import { cleanText, parsePaymentMethod, resolveCoords } from "@/lib/validate";
 
 // GET /api/rides/requests?driverId=xxx  — driver inbox (must be you, and you must be a driver)
 // GET /api/rides/requests?passengerId=xxx — your own requests
@@ -83,7 +83,23 @@ export async function PATCH(req: NextRequest) {
     if ("error" in result) {
       return NextResponse.json({ error: result.error }, { status: result.error === "Not authorised." ? 403 : 409 });
     }
-    return NextResponse.json({ request: result });
+    const isCallerPassenger = result.passengerId === auth.user.id;
+    const driverView = body.action === "complete" || !isCallerPassenger ? toDriverView(result) : undefined;
+    // Strip internal declinedBy from passenger cancel responses
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { declinedBy, ...cleanPassengerResult } = result;
+    return NextResponse.json({
+      request: driverView ?? cleanPassengerResult,
+      ...(driverView
+        ? {
+            paymentMethod: driverView.paymentMethod,
+            paymentStatus: driverView.paymentStatus,
+            amountRupees: driverView.amountRupees,
+            ...(driverView.upiUri ? { upiUri: driverView.upiUri } : {}),
+            ...(driverView.driverQrImage ? { driverQrImage: driverView.driverQrImage } : {}),
+          }
+        : {}),
+    });
   } catch (err) {
     console.error("PATCH /api/rides/requests error:", err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
@@ -127,6 +143,18 @@ export async function POST(req: NextRequest) {
     // offerId is optional: without it the request is open and any driver can accept it
     const offerId = typeof body.offerId === "string" && body.offerId.length <= 64 ? body.offerId : undefined;
 
+    let paymentMethod: "wallet" | "upi" = "wallet";
+    if (body.paymentMethod !== undefined) {
+      const parsed = parsePaymentMethod(body.paymentMethod);
+      if (!parsed) {
+        return NextResponse.json(
+          { error: "Invalid payment method. Must be 'wallet' or 'upi'." },
+          { status: 400 }
+        );
+      }
+      paymentMethod = parsed;
+    }
+
     const result = createRequest({
       offerId,
       passengerId: user.id,
@@ -139,6 +167,7 @@ export async function POST(req: NextRequest) {
       dropoffLat: dropoffCoords.lat,
       dropoffLng: dropoffCoords.lng,
       note: cleanText(body.note, 200) ?? undefined,
+      paymentMethod,
     });
 
     if ("error" in result) {

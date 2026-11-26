@@ -9,7 +9,7 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { User } from "./auth";
 import { getDb, resolveDbPath, recordWalletLedger } from "./db";
-import { cleanText, cleanVehicleNumber, parseVehicleType } from "./validate";
+import { cleanText, cleanUpiId, cleanUpiQrImage, cleanVehicleNumber, parseVehicleType } from "./validate";
 
 interface UserRow {
   id: string;
@@ -29,6 +29,9 @@ interface UserRow {
   email_verification_hash: string | null;
   email_verification_expires_at: number | null;
   session_version?: number;
+  upi_id?: string | null;
+  upi_qr_image?: string | null;
+  avatar_url?: string | null;
   created_at: number;
 }
 
@@ -58,6 +61,7 @@ const DEMO_USERS: Array<
       rating: 4.8,
       ridesCompleted: 42,
       role: "driver",
+      upiId: "aarav.mehta@okaxis",
     },
     {
       id: "usr_driver_demo_02",
@@ -70,6 +74,7 @@ const DEMO_USERS: Array<
       rating: 4.9,
       ridesCompleted: 27,
       role: "driver",
+      upiId: "rohan.varma@okhdfcbank",
     },
     {
       id: "usr_driver_demo_03",
@@ -88,9 +93,18 @@ const DEMO_USERS: Array<
 const DEMO_EMAILS = new Set(DEMO_USERS.map((u) => u.email));
 const DEMO_USER_IDS = new Set(DEMO_USERS.map((u) => u.id));
 
+export const ADMIN_USER_ID = "usr_campus_admin";
+export const ADMIN_EMAIL = "admin@kristujayanti.com";
+const ADMIN_DEFAULT_PASSWORD = process.env.HOPON_ADMIN_PASSWORD || "12345678";
+
 export function isDemoUserId(id: string | null | undefined): boolean {
   if (!id) return false;
-  return DEMO_USER_IDS.has(id) || id.startsWith("usr_driver_demo_") || id === "usr_krish_rai_01";
+  return (
+    DEMO_USER_IDS.has(id) ||
+    id.startsWith("usr_driver_demo_") ||
+    id === "usr_krish_rai_01" ||
+    id === ADMIN_USER_ID
+  );
 }
 
 export function isDemoEmail(email: string | null | undefined): boolean {
@@ -176,6 +190,10 @@ function rowToUser(row: UserRow): User {
     ...(row.vehicle_model ? { vehicleModel: row.vehicle_model } : {}),
     ...(row.vehicle_number ? { vehicleNumber: row.vehicle_number } : {}),
     ...(row.vehicle_type ? { vehicleType: row.vehicle_type } : {}),
+    ...(row.upi_id ? { upiId: row.upi_id } : {}),
+    ...(row.upi_qr_image ? { upiQrImage: row.upi_qr_image } : {}),
+    ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
+    ...(row.email.trim().toLowerCase() === ADMIN_EMAIL ? { isAdmin: true } : {}),
   };
 }
 
@@ -185,10 +203,37 @@ interface GlobalAccountsSeedState {
 const globalForAccountsSeed = globalThis as unknown as GlobalAccountsSeedState;
 
 function ensureDemoAccountsSeeded(): void {
-  if (!isDemoEnabled()) return;
   const dbPath = resolveDbPath();
   const seededPaths = (globalForAccountsSeed.__hoponSeededDbPaths ??= new Set<string>());
   const db = getDb();
+
+  // Always ensure the Campus Admin account exists and has verified credentials
+  const adminExisting = db
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get(ADMIN_EMAIL) as { id: string } | undefined;
+  const adminHash = hashPassword(ADMIN_DEFAULT_PASSWORD, "hopon_admin_salt");
+  if (!adminExisting) {
+    db.prepare(`
+      INSERT OR IGNORE INTO users (
+        id, name, email, password_hash, university, student_id_verified,
+        student_roll_number, wallet_balance, rating, rides_completed, role, created_at
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, 0, 5.0, 0, 'both', ?)
+    `).run(
+      ADMIN_USER_ID,
+      "Campus Admin",
+      ADMIN_EMAIL,
+      adminHash,
+      "Kristu Jayanti University",
+      "ADMIN-KJU-01",
+      Date.now()
+    );
+  } else {
+    db.prepare(
+      "UPDATE users SET password_hash = ?, student_id_verified = 1 WHERE email = ?"
+    ).run(adminHash, ADMIN_EMAIL);
+  }
+
+  if (!isDemoEnabled()) return;
   if (seededPaths.has(dbPath)) {
     const existingDemo = db
       .prepare("SELECT id FROM users WHERE id = ?")
@@ -221,6 +266,9 @@ function ensureDemoAccountsSeeded(): void {
     );
     // Ensure canonical role is preserved for demo users
     db.prepare("UPDATE users SET role = ? WHERE id = ?").run(u.role, u.id);
+    if ("upiId" in u && u.upiId) {
+      db.prepare("UPDATE users SET upi_id = ? WHERE id = ?").run(u.upiId, u.id);
+    }
   }
   seededPaths.add(dbPath);
 }
@@ -316,6 +364,8 @@ export function registerUser(input: {
   vehicleModel?: string;
   vehicleNumber?: string;
   vehicleType?: string;
+  upiId?: string;
+  avatarUrl?: string;
 }): User | { error: string } {
   ensureDemoAccountsSeeded();
   const name = cleanText(input.name, 80) ?? "";
@@ -354,6 +404,22 @@ export function registerUser(input: {
   let validatedVehicleType: string | null = null;
   let validatedVehicleModel: string | null = null;
   let validatedVehicleNumber: string | null = null;
+  let validatedUpiId: string | null = null;
+  let validatedAvatarUrl: string | null = null;
+
+  if (input.avatarUrl !== undefined && input.avatarUrl !== null && input.avatarUrl !== "") {
+    validatedAvatarUrl = cleanUpiQrImage(input.avatarUrl);
+    if (!validatedAvatarUrl) {
+      return { error: "Invalid profile photo. Upload a PNG, JPEG, or WebP image under 500 KB." };
+    }
+  }
+
+  if (input.upiId !== undefined && input.upiId !== null && input.upiId !== "") {
+    validatedUpiId = cleanUpiId(input.upiId);
+    if (!validatedUpiId) {
+      return { error: "Invalid UPI ID. Format should be username@bank (e.g., name@okaxis)." };
+    }
+  }
 
   if (role === "driver" || role === "both") {
     validatedVehicleType = parseVehicleType(input.vehicleType ?? "Bike");
@@ -404,6 +470,8 @@ export function registerUser(input: {
         vehicle_model = ?,
         vehicle_number = ?,
         vehicle_type = ?,
+        upi_id = COALESCE(?, upi_id),
+        avatar_url = COALESCE(?, avatar_url),
         email_verification_hash = ?,
         email_verification_expires_at = ?,
         session_version = COALESCE(session_version, 1) + 1
@@ -417,6 +485,8 @@ export function registerUser(input: {
       validatedVehicleModel,
       validatedVehicleNumber,
       validatedVehicleType,
+      validatedUpiId,
+      validatedAvatarUrl,
       initialVerifyHash,
       initialVerifyExpiresAt,
       existing.id
@@ -436,9 +506,9 @@ export function registerUser(input: {
     `INSERT INTO users (
       id, name, email, password_hash, university, student_id_verified,
       student_roll_number, wallet_balance, rating, rides_completed, role,
-      vehicle_model, vehicle_number, vehicle_type,
+      vehicle_model, vehicle_number, vehicle_type, upi_id, avatar_url,
       email_verification_hash, email_verification_expires_at, session_version, created_at
-    ) VALUES (?, ?, ?, ?, ?, 0, ?, 0, 5.0, 0, ?, ?, ?, ?, ?, ?, 1, ?)`
+    ) VALUES (?, ?, ?, ?, ?, 0, ?, 0, 5.0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
   ).run(
     id,
     name,
@@ -450,6 +520,8 @@ export function registerUser(input: {
     validatedVehicleModel,
     validatedVehicleNumber,
     validatedVehicleType,
+    validatedUpiId,
+    validatedAvatarUrl,
     initialVerifyHash,
     initialVerifyExpiresAt,
     now
@@ -590,6 +662,58 @@ export function manuallyVerifyStudent(
 
     return { success: true, user: getUserById(row.id)! };
   })();
+}
+
+export function updateUserUpiId(
+  userId: string,
+  rawUpiId: string | null
+): User | { error: string } {
+  return updateUserPaymentSettings(userId, { upiId: rawUpiId });
+}
+
+export function updateUserPaymentSettings(
+  userId: string,
+  input: { upiId?: string | null; upiQrImage?: string | null; avatarUrl?: string | null }
+): User | { error: string } {
+  ensureDemoAccountsSeeded();
+  const db = getDb();
+
+  if (input.upiId !== undefined) {
+    let validated: string | null = null;
+    if (input.upiId !== null && input.upiId !== "") {
+      validated = cleanUpiId(input.upiId);
+      if (!validated) {
+        return { error: "Invalid UPI ID. Format should be username@bank (e.g., name@okaxis)." };
+      }
+    }
+    db.prepare("UPDATE users SET upi_id = ? WHERE id = ?").run(validated, userId);
+  }
+
+  if (input.upiQrImage !== undefined) {
+    let validatedQr: string | null = null;
+    if (input.upiQrImage !== null && input.upiQrImage !== "") {
+      validatedQr = cleanUpiQrImage(input.upiQrImage);
+      if (!validatedQr) {
+        return { error: "Invalid QR image. Upload a PNG, JPEG, or WebP image under 500 KB." };
+      }
+    }
+    db.prepare("UPDATE users SET upi_qr_image = ? WHERE id = ?").run(validatedQr, userId);
+  }
+
+  if (input.avatarUrl !== undefined) {
+    let validatedAvatar: string | null = null;
+    if (input.avatarUrl !== null && input.avatarUrl !== "") {
+      validatedAvatar = cleanUpiQrImage(input.avatarUrl);
+      if (!validatedAvatar) {
+        return { error: "Invalid profile photo. Upload a PNG, JPEG, or WebP image under 500 KB." };
+      }
+    }
+    db.prepare("UPDATE users SET avatar_url = ? WHERE id = ?").run(validatedAvatar, userId);
+  }
+
+  const user = getUserById(userId);
+  if (!user) return { error: "User not found." };
+  return user;
 }
 
 export function getUserSessionVersion(userId: string): number {
@@ -787,18 +911,19 @@ export function submitUserRating(input: {
     throw err;
   }
 
-  // Compute updated weighted average combining prior baseline rating and all recorded ratings
+  // Compute updated weighted average combining fixed initial 5.0 baseline and all recorded ratings
   const stats = db
     .prepare(
       "SELECT COUNT(*) AS cnt, AVG(stars) AS avg_stars FROM ride_ratings WHERE target_user_id = ?"
     )
     .get(targetUserId) as { cnt: number; avg_stars: number | null };
 
+  const INITIAL_BASELINE_RATING = 5.0;
   const baselineWeight = Math.max(1, Math.min(10, target.rides_completed || 3));
   const totalCount = baselineWeight + (stats.cnt || 1);
   const newRating =
     Math.round(
-      ((target.rating * baselineWeight + (stats.avg_stars ?? stars) * (stats.cnt || 1)) /
+      ((INITIAL_BASELINE_RATING * baselineWeight + (stats.avg_stars ?? stars) * (stats.cnt || 1)) /
         totalCount) *
       100
     ) / 100;

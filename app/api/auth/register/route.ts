@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   createEmailVerificationToken,
   getUserSessionVersion,
+  manuallyVerifyStudent,
   registerUser,
 } from "@/lib/accounts";
+import { recordVerificationAudit } from "@/lib/db";
 import { sendVerificationEmail } from "@/lib/mailer";
 import { clientIp, readJsonObject, tooManyRequests } from "@/lib/apiAuth";
 import { limiters } from "@/lib/limiters";
@@ -13,7 +15,13 @@ import {
   SESSION_TTL_SECONDS,
   createSessionToken,
 } from "@/lib/session";
-import { cleanText, cleanVehicleNumber, parseVehicleType } from "@/lib/validate";
+import {
+  extractTextFromIdCardImage,
+  validateIdCardImageDataUrl,
+  verifyStudentIdText,
+  type StudentIdVerificationResult,
+} from "@/lib/studentIdVerifier";
+import { cleanText, cleanUpiId, cleanVehicleNumber, parseVehicleType } from "@/lib/validate";
 
 export async function POST(req: NextRequest) {
   try {
@@ -40,10 +48,19 @@ export async function POST(req: NextRequest) {
     const vehicleType = parseVehicleType(body.vehicleType);
     const vehicleModel = cleanText(body.vehicleModel, 60);
     const vehicleNumber = cleanVehicleNumber(body.vehicleNumber);
+    const upiId = typeof body.upiId === "string" ? body.upiId.trim() : undefined;
+    const avatarUrl = typeof body.avatarUrl === "string" ? body.avatarUrl.trim() : undefined;
 
     if (!name || !email || !password) {
       return NextResponse.json(
         { error: "Name, university email, and password are required." },
+        { status: 400 }
+      );
+    }
+
+    if (upiId && !cleanUpiId(upiId)) {
+      return NextResponse.json(
+        { error: "Invalid UPI ID. Format should be username@bank (e.g., name@okaxis)." },
         { status: 400 }
       );
     }
@@ -79,6 +96,60 @@ export async function POST(req: NextRequest) {
       return tooManyRequests(regCheck.retryAfterSec);
     }
 
+    // Student ID Card OCR & 3-Condition Verification (when provided by registration form)
+    const hasIdCardPayload =
+      body.requireIdCardVerification === true ||
+      body.idCardImage !== undefined ||
+      body.idCardText !== undefined;
+
+    let idVerificationResult: StudentIdVerificationResult | null = null;
+
+    if (hasIdCardPayload) {
+      const validatedImage = validateIdCardImageDataUrl(body.idCardImage);
+      const clientExtractedText =
+        typeof body.idCardText === "string" ? body.idCardText.trim() : undefined;
+
+      if (!validatedImage && !clientExtractedText) {
+        return NextResponse.json(
+          {
+            error: "Please upload a photo of your Student ID card to verify your account.",
+          },
+          { status: 400 }
+        );
+      }
+
+      const { text: extractedText } = validatedImage
+        ? await extractTextFromIdCardImage(validatedImage, clientExtractedText)
+        : { text: clientExtractedText ?? "" };
+
+      const referenceYear =
+        typeof body.referenceYear === "number" &&
+        Number.isInteger(body.referenceYear) &&
+        body.referenceYear >= 2020 &&
+        body.referenceYear <= 2035
+          ? body.referenceYear
+          : undefined;
+
+      idVerificationResult = verifyStudentIdText({
+        extractedText,
+        registeredName: name,
+        registeredRollNumber: studentRollNumber,
+        referenceYear,
+      });
+
+      if (!idVerificationResult.verified) {
+        return NextResponse.json(
+          {
+            error:
+              idVerificationResult.error ??
+              "Student ID card verification failed. Please upload a clear, valid Student ID card.",
+            idVerification: idVerificationResult,
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     const result = registerUser({
       name,
       email,
@@ -86,6 +157,8 @@ export async function POST(req: NextRequest) {
       role,
       university,
       studentRollNumber,
+      ...(upiId ? { upiId } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}),
       ...(role === "driver" || role === "both"
         ? {
             vehicleType: vehicleType!,
@@ -99,17 +172,36 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
+    let finalUser = result;
     let emailSent = false;
     let message = "Verification link sent to your university email.";
-    const verifyIssued = createEmailVerificationToken(result.id);
-    if (!("error" in verifyIssued)) {
-      const sendRes = await sendVerificationEmail(email, verifyIssued.token, name);
-      if (sendRes.success) {
-        emailSent = true;
-      } else {
-        emailSent = false;
-        message =
-          "Account registered, but we could not send the verification email. Please try resending from your account.";
+    let verifyTokenForLocalDev: string | undefined;
+
+    if (idVerificationResult?.verified) {
+      // Automatically verify the student account once all 3 ID card checks pass
+      const verifiedRes = manuallyVerifyStudent(email, studentRollNumber);
+      if (verifiedRes.success && verifiedRes.user) {
+        finalUser = verifiedRes.user;
+      }
+      recordVerificationAudit({
+        studentEmail: email,
+        rollNumber: studentRollNumber ?? null,
+        method: "student_id_ocr",
+        ip,
+      });
+      message = "Student ID card verified automatically.";
+    } else {
+      const verifyIssued = createEmailVerificationToken(result.id);
+      if (!("error" in verifyIssued)) {
+        verifyTokenForLocalDev = verifyIssued.token;
+        const sendRes = await sendVerificationEmail(email, verifyIssued.token, name);
+        if (sendRes.success) {
+          emailSent = true;
+        } else {
+          emailSent = false;
+          message =
+            "Account registered, but we could not send the verification email. Please try resending from your account.";
+        }
       }
     }
 
@@ -118,22 +210,23 @@ export async function POST(req: NextRequest) {
     const response = NextResponse.json(
       {
         success: true,
-        user: result,
-        verificationRequired: !result.studentIdVerified,
+        user: finalUser,
+        verificationRequired: !finalUser.studentIdVerified,
         emailSent,
         message,
-        ...(isLocalHost && !("error" in verifyIssued)
-          ? { verificationToken: verifyIssued.token }
+        ...(idVerificationResult ? { idVerification: idVerificationResult } : {}),
+        ...(isLocalHost && verifyTokenForLocalDev
+          ? { verificationToken: verifyTokenForLocalDev }
           : {}),
       },
       { status: 201 }
     );
 
-    if (result.studentIdVerified) {
-      const sessionVer = getUserSessionVersion(result.id);
+    if (finalUser.studentIdVerified && body.redirectToLogin !== true) {
+      const sessionVer = getUserSessionVersion(finalUser.id);
       const rememberMe = body.rememberMe !== false;
       const token = createSessionToken(
-        result.id,
+        finalUser.id,
         rememberMe ? REMEMBER_ME_SECONDS : SESSION_TTL_SECONDS,
         undefined,
         Date.now(),

@@ -38,7 +38,7 @@ export function requireUser(
   if (!user) {
     return { response: NextResponse.json({ error: "Please sign in to continue." }, { status: 401 }) };
   }
-  if ((role === "driver" || options?.requireVerified) && !user.studentIdVerified) {
+  if ((role === "driver" || role === "both" || options?.requireVerified) && !user.studentIdVerified) {
     return {
       response: NextResponse.json(
         { error: "Please verify your university email before continuing." },
@@ -50,6 +50,22 @@ export function requireUser(
     return {
       response: NextResponse.json(
         { error: "Only student drivers can do this." },
+        { status: 403 }
+      ),
+    };
+  }
+  if (role === "passenger" && user.role !== "passenger" && user.role !== "both") {
+    return {
+      response: NextResponse.json(
+        { error: "Only student passengers can do this." },
+        { status: 403 }
+      ),
+    };
+  }
+  if (role === "both" && user.role !== "both") {
+    return {
+      response: NextResponse.json(
+        { error: "This action requires a dual passenger/driver account." },
         { status: 403 }
       ),
     };

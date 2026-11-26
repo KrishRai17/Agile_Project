@@ -11,6 +11,11 @@ interface RatingModalProps {
   targetName: string;
   targetRole: "driver" | "passenger";
   fare?: string;
+  pickup?: string;
+  dropoff?: string;
+  vehicleModel?: string;
+  vehicleNumber?: string;
+  paymentMethod?: "wallet" | "upi";
   onSubmitted?: (newRating: number) => void;
 }
 
@@ -25,10 +30,17 @@ export default function RatingModal({
   targetName,
   targetRole,
   fare,
+  pickup,
+  dropoff,
+  vehicleModel,
+  vehicleNumber,
+  paymentMethod,
   onSubmitted,
 }: RatingModalProps) {
   const [stars, setStars] = useState(5);
-  const [selectedTags, setSelectedTags] = useState<string[]>(["On Time"]);
+  const [selectedTags, setSelectedTags] = useState<string[]>(() =>
+    targetRole === "driver" ? ["On Time"] : ["Ready at Pickup"]
+  );
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
@@ -109,15 +121,41 @@ export default function RatingModal({
           <form onSubmit={handleSubmit} className="p-6 space-y-4">
             <div className="text-center">
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                How was your trip with
+                Ride Completed · How was your trip with
               </p>
               <p className="text-lg font-bold text-slate-900 mt-0.5">{targetName}</p>
               {fare && (
                 <span className="inline-block mt-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold">
                   Fare: ₹{fare.replace(/^₹/, "")}
+                  {paymentMethod ? ` (${paymentMethod === "upi" ? "UPI" : "Wallet"})` : ""}
                 </span>
               )}
             </div>
+
+            {(pickup || dropoff || vehicleModel) && (
+              <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 text-xs space-y-1.5">
+                {pickup && (
+                  <div className="flex items-center gap-2 text-slate-700">
+                    <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" />
+                    <span className="font-semibold truncate">{pickup}</span>
+                  </div>
+                )}
+                {dropoff && (
+                  <div className="flex items-center gap-2 text-slate-700">
+                    <span className="w-2 h-2 rounded-xs bg-indigo-600 shrink-0" />
+                    <span className="font-semibold truncate">{dropoff}</span>
+                  </div>
+                )}
+                {vehicleModel && (
+                  <div className="pt-1 border-t border-slate-200/70 text-[11px] text-slate-500 flex items-center justify-between">
+                    <span>Vehicle</span>
+                    <span className="font-semibold text-slate-700">
+                      {vehicleModel}{vehicleNumber ? ` · ${vehicleNumber}` : ""}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* 1-5 Star Selector */}
             <div className="flex items-center justify-center gap-2 py-1">

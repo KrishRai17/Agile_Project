@@ -30,7 +30,9 @@ interface MapWrapperProps {
   onRouteInfo?: (distanceKm: number, durationMin: number) => void;
   onGpsUpdate?: (loc: { lat: number; lng: number; accuracy?: number }) => void;
   acceptedRideRoute?: AcceptedRideRoute | null;
+  matchingRidesCount?: number;
   onClearAcceptedRoute?: () => void;
+  onCompleteAcceptedRide?: () => void;
   isDriver?: boolean;
   onDriverLocationUpdate?: (loc: { lat: number; lng: number }) => void;
   onRidePhaseChange?: (phase: "pickup" | "dropoff") => void;

@@ -390,6 +390,8 @@ export interface AcceptedRideRoute {
   passengerId?: string;
   passengerName: string;
   fare?: string;
+  paymentMethod?: "wallet" | "upi";
+  paymentStatus?: "none" | "wallet_paid" | "pending" | "paid";
   phase?: RidePhase;
   tripStage?: RideTripStage;
   /** 4-digit OTP shown to the passenger so they can share it with the driver at pickup. */
@@ -416,6 +418,7 @@ export interface MatchingCampusRide {
   driverId: string;
   driverName: string;
   driverRating: number;
+  vehicleType?: "Bike" | "Scooty" | "Car";
   vehicleModel: string;
   vehicleNumber: string;
   departureTime: string;

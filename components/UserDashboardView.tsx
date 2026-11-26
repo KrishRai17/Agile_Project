@@ -23,8 +23,11 @@ import {
   GraduationCap,
   Copy,
   Check,
+  Upload,
+  Trash2,
+  QrCode,
 } from "lucide-react";
-import { User, logout } from "@/lib/auth";
+import { User, logout, setStoredUser } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ToastContext";
 
@@ -43,6 +46,7 @@ export default function UserDashboardView({
 }: UserDashboardViewProps) {
   const router = useRouter();
   const { showToast } = useToast();
+  const canUseWallet = user.role === "driver" || user.role === "both";
   const [prevInitialNav, setPrevInitialNav] = useState(initialNav);
   const [activeNav, setActiveNav] = useState<"overview" | "rides" | "places" | "payments" | "settings">(initialNav);
 
@@ -52,6 +56,192 @@ export default function UserDashboardView({
   }
 
   const [copiedRoll, setCopiedRoll] = useState(false);
+  const [prevUserUpiId, setPrevUserUpiId] = useState(user.upiId ?? "");
+  const [upiIdInput, setUpiIdInput] = useState(user.upiId ?? "");
+  if ((user.upiId ?? "") !== prevUserUpiId) {
+    setPrevUserUpiId(user.upiId ?? "");
+    setUpiIdInput(user.upiId ?? "");
+  }
+  const upiQrPreview = user.upiQrImage ?? null;
+  const avatarPreview = user.avatarUrl ?? null;
+  const [savingPaymentSettings, setSavingPaymentSettings] = useState(false);
+  const [savingAvatar, setSavingAvatar] = useState(false);
+
+  const resizeAvatarImageToDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Could not read file."));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("Invalid image file."));
+        img.onload = () => {
+          const size = 320;
+          const canvas = document.createElement("canvas");
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("Canvas unavailable."));
+            return;
+          }
+          // Center-crop square
+          const minSide = Math.min(img.width, img.height);
+          const sx = Math.max(0, Math.round((img.width - minSide) / 2));
+          const sy = Math.max(0, Math.round((img.height - minSide) / 2));
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, size, size);
+          ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, size, size);
+          resolve(canvas.toDataURL("image/jpeg", 0.88));
+        };
+        img.src = String(reader.result);
+      };
+      reader.readAsDataURL(file);
+    });
+
+  const handleAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      showToast("Invalid Format", "Please upload a PNG, JPEG, or WebP profile photo.", "error");
+      return;
+    }
+    try {
+      const dataUrl = await resizeAvatarImageToDataUrl(file);
+      if (dataUrl.length > 750_000) {
+        showToast("Image Too Large", "Please choose a smaller profile photo.", "error");
+        return;
+      }
+      setSavingAvatar(true);
+      const res = await fetch("/api/auth/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ avatarUrl: dataUrl }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.user) {
+        showToast("Upload Failed", data.error || "Could not save profile photo.", "error");
+        return;
+      }
+      setStoredUser(data.user, true);
+      showToast("Profile Photo Updated! ✓", "Your new profile photo has been saved.", "success");
+    } catch {
+      showToast("Upload Error", "Could not process the selected photo.", "error");
+    } finally {
+      setSavingAvatar(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleRemoveAvatar = async () => {
+    setSavingAvatar(true);
+    try {
+      const res = await fetch("/api/auth/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ avatarUrl: null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.user) {
+        showToast("Update Failed", data.error || "Could not remove profile photo.", "error");
+        return;
+      }
+      setStoredUser(data.user, true);
+      showToast("Profile Photo Removed", "Reverted to your default initials avatar.", "info");
+    } catch {
+      showToast("Network Error", "Could not remove profile photo.", "error");
+    } finally {
+      setSavingAvatar(false);
+    }
+  };
+
+  const resizeQrImageToDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Could not read file."));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("Invalid image file."));
+        img.onload = () => {
+          const maxDim = 600;
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("Canvas unavailable."));
+            return;
+          }
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL("image/png"));
+        };
+        img.src = String(reader.result);
+      };
+      reader.readAsDataURL(file);
+    });
+
+  const handleQrFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!["image/png", "image/jpeg", "image/jpg", "image/webp"].includes(file.type)) {
+      showToast("Invalid Format", "Please upload a PNG, JPEG, or WebP QR code image.", "error");
+      return;
+    }
+    try {
+      const dataUrl = await resizeQrImageToDataUrl(file);
+      if (dataUrl.length > 750_000) {
+        showToast("Image Too Large", "Please choose a smaller QR image.", "error");
+        return;
+      }
+      setSavingPaymentSettings(true);
+      const res = await fetch("/api/auth/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upiQrImage: dataUrl }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.user) {
+        showToast("Upload Failed", data.error || "Could not save QR code.", "error");
+        return;
+      }
+      setStoredUser(data.user, true);
+      showToast("QR Code Saved! ✓", "Your QR code will appear on the payment screen after rides end.", "success");
+    } catch {
+      showToast("Upload Error", "Could not process the selected image.", "error");
+    } finally {
+      setSavingPaymentSettings(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleSavePaymentSettings = async (removeQr = false) => {
+    setSavingPaymentSettings(true);
+    try {
+      const res = await fetch("/api/auth/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          upiId: upiIdInput.trim().toLowerCase() || null,
+          ...(removeQr ? { upiQrImage: null } : {}),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.user) {
+        showToast("Save Failed", data.error || "Could not update payment settings.", "error");
+        return;
+      }
+      setStoredUser(data.user, true);
+      showToast("Payment Settings Updated", removeQr ? "QR code removed." : "UPI settings saved.", "success");
+    } catch {
+      showToast("Network Error", "Could not update payment settings.", "error");
+    } finally {
+      setSavingPaymentSettings(false);
+    }
+  };
   const [activeRide, setActiveRide] = useState<{
     id: string;
     pickup: string;
@@ -67,24 +257,33 @@ export default function UserDashboardView({
     let cancelled = false;
     (async () => {
       try {
-        const queryParam = user.role === "driver" ? `driverId=${user.id}` : `passengerId=${user.id}`;
-        const res = await fetch(`/api/rides/requests?${queryParam}`);
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        const active = (data.requests || []).find(
-          (r: { status: string }) => r.status === "accepted" || r.status === "pending"
-        );
-        if (active && !cancelled) {
-          setActiveRide({
-            id: active.id,
-            pickup: active.pickup,
-            dropoff: active.dropoff,
-            status: active.status,
-            driverName: active.offer?.driverName || (user.role === "driver" ? user.name : "Student Driver"),
-            vehicleModel: active.offer?.vehicleModel || user.vehicleModel || "Campus Vehicle",
-            vehicleNumber: active.offer?.vehicleNumber || user.vehicleNumber || "KA 04 EK 7142",
-            fare: active.agreedFare || active.offer?.farePerSeat || "₹35",
-          });
+        const queries =
+          user.role === "both"
+            ? [`driverId=${user.id}`, `passengerId=${user.id}`]
+            : [user.role === "driver" ? `driverId=${user.id}` : `passengerId=${user.id}`];
+
+        for (const queryParam of queries) {
+          const res = await fetch(`/api/rides/requests?${queryParam}`);
+          if (!res.ok || cancelled) continue;
+          const data = await res.json();
+          const active = (data.requests || []).find(
+            (r: { status: string }) => r.status === "accepted" || r.status === "pending"
+          );
+          if (active && !cancelled) {
+            setActiveRide({
+              id: active.id,
+              pickup: active.pickup,
+              dropoff: active.dropoff,
+              status: active.status,
+              driverName:
+                active.offer?.driverName ||
+                (queryParam.startsWith("driverId=") ? user.name : "Student Driver"),
+              vehicleModel: active.offer?.vehicleModel || user.vehicleModel || "Campus Vehicle",
+              vehicleNumber: active.offer?.vehicleNumber || user.vehicleNumber || "KA 04 EK 7142",
+              fare: active.agreedFare || active.offer?.farePerSeat || "₹35",
+            });
+            break;
+          }
         }
       } catch {
         // silent
@@ -203,18 +402,20 @@ export default function UserDashboardView({
                   <span>Saved places</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setActiveNav("payments")}
-                  className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-colors cursor-pointer ${
-                    activeNav === "payments"
-                      ? "bg-sky-50 text-sky-700 font-bold"
-                      : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
-                  }`}
-                >
-                  <CreditCard className="w-4 h-4" />
-                  <span>Payments</span>
-                </button>
+                {canUseWallet && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveNav("payments")}
+                    className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-colors cursor-pointer ${
+                      activeNav === "payments"
+                        ? "bg-sky-50 text-sky-700 font-bold"
+                        : "text-slate-600 hover:bg-slate-100/80 hover:text-slate-900"
+                    }`}
+                  >
+                    <CreditCard className="w-4 h-4" />
+                    <span>Payments</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
@@ -302,8 +503,62 @@ export default function UserDashboardView({
                 <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-sky-100/50 via-blue-50/20 to-transparent rounded-full -mr-20 -mt-20 pointer-events-none" />
                 <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-6">
                   <div className="flex items-center gap-4 sm:gap-5">
-                    <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-br from-[#27a8f5] to-indigo-600 text-white font-black text-2xl sm:text-3xl flex items-center justify-center shadow-md shadow-sky-500/20 shrink-0">
-                      {user.name.slice(0, 2).toUpperCase()}
+                    <div className="flex flex-col items-center gap-2 shrink-0">
+                      <div className="relative group">
+                        {avatarPreview ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={avatarPreview}
+                            alt={user.name}
+                            className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl object-cover border-2 border-sky-200 shadow-md"
+                          />
+                        ) : (
+                          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-br from-[#27a8f5] to-indigo-600 text-white font-black text-2xl sm:text-3xl flex items-center justify-center shadow-md shadow-sky-500/20">
+                            {user.name.slice(0, 2).toUpperCase()}
+                          </div>
+                        )}
+                        <label
+                          title="Upload or change profile photo"
+                          className="absolute -bottom-1.5 -right-1.5 h-7 w-7 rounded-full bg-slate-900 hover:bg-[#27a8f5] text-white flex items-center justify-center shadow-md cursor-pointer transition-colors border-2 border-white"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            disabled={savingAvatar}
+                            onChange={(e) => void handleAvatarFileChange(e)}
+                            className="sr-only"
+                          />
+                        </label>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <label className="text-[10px] font-bold text-[#0284c7] hover:underline cursor-pointer">
+                          {savingAvatar
+                            ? "Saving..."
+                            : avatarPreview
+                            ? "Change photo"
+                            : "Add photo"}
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            disabled={savingAvatar}
+                            onChange={(e) => void handleAvatarFileChange(e)}
+                            className="sr-only"
+                          />
+                        </label>
+                        {avatarPreview && !savingAvatar && (
+                          <>
+                            <span className="text-slate-300 text-[10px]">·</span>
+                            <button
+                              type="button"
+                              onClick={() => void handleRemoveAvatar()}
+                              className="text-[10px] font-bold text-rose-600 hover:underline cursor-pointer"
+                            >
+                              Remove
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -346,8 +601,8 @@ export default function UserDashboardView({
                     </div>
                   </div>
 
-                  {/* 3 Metric Pills */}
-                  <div className="grid grid-cols-3 gap-3 md:border-l md:border-slate-100 md:pl-6 shrink-0">
+                  {/* Metric Pills */}
+                  <div className={`grid ${canUseWallet ? "grid-cols-3" : "grid-cols-2"} gap-3 md:border-l md:border-slate-100 md:pl-6 shrink-0`}>
                     <div className="p-3 rounded-2xl bg-slate-50 border border-slate-100 text-center">
                       <p className="text-[10px] font-bold uppercase text-slate-400">RATING</p>
                       <p className="text-base sm:text-lg font-black text-slate-900 mt-0.5 flex items-center justify-center gap-1">
@@ -362,13 +617,15 @@ export default function UserDashboardView({
                       </p>
                       <p className="text-[9px] text-slate-500">completed</p>
                     </div>
-                    <div className="p-3 rounded-2xl bg-sky-50/70 border border-sky-100 text-center">
-                      <p className="text-[10px] font-bold uppercase text-[#0284c7]">WALLET</p>
-                      <p className="text-base sm:text-lg font-black text-[#0284c7] mt-0.5">
-                        ₹{Number(user.walletBalance ?? 0).toFixed(2)}
-                      </p>
-                      <p className="text-[9px] text-sky-600/80">balance</p>
-                    </div>
+                    {canUseWallet && (
+                      <div className="p-3 rounded-2xl bg-sky-50/70 border border-sky-100 text-center">
+                        <p className="text-[10px] font-bold uppercase text-[#0284c7]">WALLET</p>
+                        <p className="text-base sm:text-lg font-black text-[#0284c7] mt-0.5">
+                          ₹{Number(user.walletBalance ?? 0).toFixed(2)}
+                        </p>
+                        <p className="text-[9px] text-sky-600/80">balance</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -447,24 +704,129 @@ export default function UserDashboardView({
                         </span>
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                         <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
                           <p className="text-[10px] font-bold uppercase text-slate-400">VEHICLE MODEL</p>
-                          <p className="font-bold text-slate-900 text-sm mt-0.5">
+                          <p className="font-bold text-slate-900 text-sm mt-0.5 truncate">
                             {user.vehicleModel || "Campus Vehicle"}
                           </p>
                         </div>
                         <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
                           <p className="text-[10px] font-bold uppercase text-slate-400">LICENSE PLATE</p>
-                          <p className="font-bold text-slate-900 text-sm mt-0.5 font-mono">
+                          <p className="font-bold text-slate-900 text-sm mt-0.5 font-mono truncate">
                             {user.vehicleNumber || "KA 04 EK 7142"}
                           </p>
                         </div>
                         <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                          <p className="text-[10px] font-bold uppercase text-slate-400">CAMPUS CORRIDOR</p>
-                          <p className="font-semibold text-slate-900 text-sm mt-0.5">
-                            KJU ↔ Manyata Tech Park
+                          <p className="text-[10px] font-bold uppercase text-slate-400">UPI ID (FOR PASSENGER QR)</p>
+                          <p className="font-semibold text-slate-900 text-sm mt-0.5 font-mono truncate">
+                            {user.upiId || "Not set (wallet only)"}
                           </p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold uppercase text-slate-400">CAMPUS CORRIDOR</p>
+                          <p className="font-semibold text-slate-900 text-sm mt-0.5 truncate">
+                            KJU ↔ Manyata
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Rider UPI ID & QR Code Upload Settings */}
+                      <div className="pt-4 border-t border-slate-100 space-y-4">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <QrCode className="w-4 h-4 text-[#0284c7]" />
+                            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                              Rider Payment Wall &amp; QR Settings
+                            </h4>
+                          </div>
+                          <span className="text-[11px] text-slate-500">
+                            Shown on your screen when a UPI ride ends
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+                          {/* UPI ID Form */}
+                          <div className="md:col-span-7 space-y-2.5">
+                            <label
+                              htmlFor="settings-upi-id"
+                              className="block text-[11px] font-bold uppercase text-slate-600"
+                            >
+                              UPI ID (VPA)
+                            </label>
+                            <div className="flex gap-2">
+                              <input
+                                id="settings-upi-id"
+                                type="text"
+                                value={upiIdInput}
+                                onChange={(e) => setUpiIdInput(e.target.value.toLowerCase())}
+                                placeholder="e.g. name@okaxis or phone@upi"
+                                className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                              />
+                              <button
+                                type="button"
+                                disabled={savingPaymentSettings}
+                                onClick={() => void handleSavePaymentSettings(false)}
+                                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-bold cursor-pointer transition-colors"
+                              >
+                                {savingPaymentSettings ? "Saving..." : "Save"}
+                              </button>
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              Upload your GPay / PhonePe / Paytm QR code image, or enter a UPI ID to auto-generate an amount-locked QR.
+                            </p>
+
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                              <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-[#0284c7] text-xs font-bold cursor-pointer transition-colors">
+                                <Upload className="w-3.5 h-3.5" />
+                                <span>{upiQrPreview ? "Replace QR Image" : "Upload QR Image"}</span>
+                                <input
+                                  type="file"
+                                  accept="image/png,image/jpeg,image/webp"
+                                  onChange={(e) => void handleQrFileChange(e)}
+                                  className="sr-only"
+                                />
+                              </label>
+                              {upiQrPreview && (
+                                <button
+                                  type="button"
+                                  disabled={savingPaymentSettings}
+                                  onClick={() => void handleSavePaymentSettings(true)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold cursor-pointer transition-colors"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Remove QR</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* QR Preview */}
+                          <div className="md:col-span-5 flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                            {upiQrPreview ? (
+                              <>
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={upiQrPreview}
+                                  alt="Uploaded rider payment QR code"
+                                  className="w-32 h-32 object-contain rounded-xl bg-white p-1.5 border border-slate-200 shadow-2xs"
+                                />
+                                <span className="text-[10px] font-semibold text-emerald-700 mt-1.5">
+                                  Active Payment Wall QR ✓
+                                </span>
+                              </>
+                            ) : (
+                              <div className="py-5 text-center space-y-1">
+                                <QrCode className="w-8 h-8 text-slate-300 mx-auto" />
+                                <p className="text-[11px] font-semibold text-slate-500">
+                                  No custom QR uploaded
+                                </p>
+                                <p className="text-[10px] text-slate-400">
+                                  PNG, JPG or WebP
+                                </p>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -526,48 +888,50 @@ export default function UserDashboardView({
 
                 {/* Right Column (4 cols): Wallet & Account Actions */}
                 <div className="lg:col-span-4 space-y-6">
-                  {/* HopOn Wallet Card */}
-                  <div className="p-6 rounded-3xl bg-slate-950 text-white shadow-xl flex flex-col justify-between space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-                        <Wallet className="w-4 h-4 text-[#27a8f5]" />
-                        <span>HopOn Student Wallet</span>
+                  {/* HopOn Wallet Card (drivers/both only) */}
+                  {canUseWallet && (
+                    <div className="p-6 rounded-3xl bg-slate-950 text-white shadow-xl flex flex-col justify-between space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+                          <Wallet className="w-4 h-4 text-[#27a8f5]" />
+                          <span>HopOn Student Wallet</span>
+                        </div>
+                        <span className="text-[10px] font-bold bg-sky-500/20 text-sky-300 px-2 py-0.5 rounded-full border border-sky-500/30">
+                          Zero Fees
+                        </span>
                       </div>
-                      <span className="text-[10px] font-bold bg-sky-500/20 text-sky-300 px-2 py-0.5 rounded-full border border-sky-500/30">
-                        Zero Fees
-                      </span>
-                    </div>
 
-                    <div>
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                        CURRENT BALANCE
-                      </p>
-                      <p className="text-3xl font-black text-white mt-0.5">
-                        ₹{Number(user.walletBalance ?? 0).toFixed(2)}
-                      </p>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        Usable for all campus rides and instant student payouts.
-                      </p>
-                    </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                          CURRENT BALANCE
+                        </p>
+                        <p className="text-3xl font-black text-white mt-0.5">
+                          ₹{Number(user.walletBalance ?? 0).toFixed(2)}
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Usable for all campus rides and instant student payouts.
+                        </p>
+                      </div>
 
-                    <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setActiveNav("payments")}
-                        className="flex-1 py-2 px-3 rounded-xl bg-[#27a8f5] hover:bg-[#1f96de] text-white font-bold text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add Money</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setActiveNav("payments")}
-                        className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition-colors cursor-pointer"
-                      >
-                        History
-                      </button>
+                      <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setActiveNav("payments")}
+                          className="flex-1 py-2 px-3 rounded-xl bg-[#27a8f5] hover:bg-[#1f96de] text-white font-bold text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add Money</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveNav("payments")}
+                          className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition-colors cursor-pointer"
+                        >
+                          History
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Account Actions Card */}
                   <div className="p-5 rounded-3xl bg-white border border-slate-200/90 shadow-2xs space-y-3">
@@ -629,8 +993,8 @@ export default function UserDashboardView({
             </div>
           </div>
 
-          {/* Top 4 Metric Cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Top Metric Cards */}
+          <div className={`grid ${canUseWallet ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-1 sm:grid-cols-3"} gap-4`}>
             {/* Rides Completed */}
             <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs relative">
               <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center absolute top-4 right-4">
@@ -643,17 +1007,19 @@ export default function UserDashboardView({
               <p className="text-[11px] text-slate-400 mt-0.5">Verified campus trips</p>
             </div>
 
-            {/* Total Spent / Contributed */}
-            <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs relative">
-              <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center absolute top-4 right-4">
-                <CreditCard className="w-4 h-4" />
+            {/* Wallet Balance (drivers/both only) */}
+            {canUseWallet && (
+              <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs relative">
+                <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center absolute top-4 right-4">
+                  <CreditCard className="w-4 h-4" />
+                </div>
+                <p className="text-xs font-semibold text-slate-500">Wallet balance</p>
+                <p className="text-2xl sm:text-3xl font-extrabold text-slate-900 mt-1">
+                  ₹{user.walletBalance ?? 0}
+                </p>
+                <p className="text-[11px] text-slate-400 mt-0.5">HopOn Student Balance</p>
               </div>
-              <p className="text-xs font-semibold text-slate-500">Wallet balance</p>
-              <p className="text-2xl sm:text-3xl font-extrabold text-slate-900 mt-1">
-                ₹{user.walletBalance ?? 0}
-              </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">HopOn Student Balance</p>
-            </div>
+            )}
 
             {/* You Saved */}
             <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs relative">
@@ -949,43 +1315,45 @@ export default function UserDashboardView({
                 </div>
               </div>
 
-              {/* HopOn Wallet Card */}
-              <div
-                className={`p-5 sm:p-6 rounded-3xl bg-slate-950 text-white shadow-xl flex flex-col justify-between transition-all ${
-                  activeNav === "payments" ? "ring-4 ring-sky-400 ring-offset-2 ring-offset-slate-50" : ""
-                }`}
-              >
-                <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-                  <Wallet className="w-4 h-4 text-[#27a8f5]" />
-                  <span>HopOn wallet</span>
-                </div>
-
-                <div className="mt-4 flex items-end justify-between">
-                  <div>
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      AVAILABLE BALANCE
-                    </p>
-                    <p className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
-                      ₹{Number(user.walletBalance ?? 0).toFixed(2)}
-                    </p>
+              {/* HopOn Wallet Card (drivers/both only) */}
+              {canUseWallet && (
+                <div
+                  className={`p-5 sm:p-6 rounded-3xl bg-slate-950 text-white shadow-xl flex flex-col justify-between transition-all ${
+                    activeNav === "payments" ? "ring-4 ring-sky-400 ring-offset-2 ring-offset-slate-50" : ""
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+                    <Wallet className="w-4 h-4 text-[#27a8f5]" />
+                    <span>HopOn wallet</span>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      showToast(
-                        "Campus Cashier Desk",
-                        "Visit the KJU Finance & Cashier desk with your roll number to deposit cash and top up your student wallet.",
-                        "info"
-                      )
-                    }
-                    className="px-3.5 py-2 rounded-xl bg-[#27a8f5] hover:bg-[#1f96de] active:scale-[0.98] text-white font-bold text-xs transition-colors flex items-center gap-1.5 cursor-pointer shadow-md shadow-sky-500/20"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add money</span>
-                  </button>
+                  <div className="mt-4 flex items-end justify-between">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        AVAILABLE BALANCE
+                      </p>
+                      <p className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
+                        ₹{Number(user.walletBalance ?? 0).toFixed(2)}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        showToast(
+                          "Campus Cashier Desk",
+                          "Visit the KJU Finance & Cashier desk with your roll number to deposit cash and top up your student wallet.",
+                          "info"
+                        )
+                      }
+                      className="px-3.5 py-2 rounded-xl bg-[#27a8f5] hover:bg-[#1f96de] active:scale-[0.98] text-white font-bold text-xs transition-colors flex items-center gap-1.5 cursor-pointer shadow-md shadow-sky-500/20"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add money</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         </>

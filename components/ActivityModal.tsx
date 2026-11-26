@@ -117,8 +117,8 @@ export default function ActivityModal({ isOpen, onClose }: ActivityModalProps) {
                 <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
                   <CheckCircle2 className="w-3.5 h-3.5" /> {trip.status}
                 </span>
-                <span className="text-blue-600 font-medium hover:underline cursor-pointer">
-                  View receipt →
+                <span className="text-slate-400 font-medium">
+                  Verified Campus Trip
                 </span>
               </div>
             </div>

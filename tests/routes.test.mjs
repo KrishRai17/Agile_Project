@@ -25,6 +25,10 @@ const verifyRoute = await loadTs("app/api/auth/verify/route.ts");
 const cashierRoute = await loadTs("app/api/cashier/verify-student/route.ts");
 const locationRoute = await loadTs("app/api/rides/location/route.ts");
 const logoutRoute = await loadTs("app/api/auth/logout/route.ts");
+const meRoute = await loadTs("app/api/auth/me/route.ts");
+const adminOverviewRoute = await loadTs("app/api/admin/overview/route.ts");
+const verifyIdCardRoute = await loadTs("app/api/auth/verify-id-card/route.ts");
+const studentIdVerifier = await loadTs("lib/studentIdVerifier.ts");
 const dbStatusRoute = await loadTs("app/api/db/status/route.ts");
 const rateLimit = await loadTs("lib/rateLimit.ts");
 const mailer = await loadTs("lib/mailer.ts");
@@ -914,6 +918,492 @@ test("Phase 4: Session version enforcement, privacy and location probing defense
     if (origSession) process.env.SESSION_SECRET = origSession; else delete process.env.SESSION_SECRET;
   }
 });
+
+// ---------- 7. UPI direct payment & QR flows ----------
+
+test("UPI rides: creation, refusal when driver has no UPI ID, acceptance with zero wallet, completion without wallet movement, and confirm_payment", async () => {
+  const db = dbModule.getDb();
+
+  // 1. Creation validates paymentMethod
+  const badMethodRes = await call(requestsRoute.POST, "/api/rides/requests", {
+    method: "POST",
+    userId: PASSENGER,
+    body: {
+      offerId: "offer_seed_001",
+      pickup: "Kristu Jayanti University",
+      dropoff: "Manyata Tech Park",
+      paymentMethod: "crypto",
+    },
+  });
+  assert.equal(badMethodRes.status, 400, "invalid paymentMethod rejected with 400");
+
+  // Create a driver without a UPI ID
+  const noUpiDriverId = `usr_no_upi_${Date.now()}`;
+  db.prepare(`
+    INSERT INTO users (id, email, password_hash, name, university, rating, role, wallet_balance, student_id_verified, created_at, session_version, upi_id)
+    VALUES (?, ?, 'hash', 'No UPI Driver', 'Kristu Jayanti University', 5.0, 'driver', 0, 1, ?, 1, NULL)
+  `).run(noUpiDriverId, `noupi_${Date.now()}@kristujayanti.com`, Date.now());
+
+  const noUpiOffer = store.createOffer({
+    driverId: noUpiDriverId,
+    driverName: "No UPI Driver",
+    driverUniversity: "Kristu Jayanti University",
+    driverRating: 5.0,
+    vehicleType: "Bike",
+    vehicleModel: "Honda Shine",
+    vehicleNumber: "KA 01 AB 1234",
+    from: "Kristu Jayanti University",
+    fromLat: 13.0583,
+    fromLng: 77.6426,
+    to: "Manyata Tech Park",
+    toLat: 13.045,
+    toLng: 77.62,
+    farePerSeat: "35",
+    seats: 1,
+    departureTime: "Immediate",
+    departureDate: "Today",
+  });
+
+  // Create a passenger with ₹0 wallet balance
+  const brokeUpiPassengerId = `usr_broke_upi_${Date.now()}`;
+  db.prepare(`
+    INSERT INTO users (id, email, password_hash, name, university, rating, role, wallet_balance, student_id_verified, created_at, session_version)
+    VALUES (?, ?, 'hash', 'Broke UPI Passenger', 'Kristu Jayanti University', 5.0, 'passenger', 0, 1, ?, 1)
+  `).run(brokeUpiPassengerId, `broke_upi_${Date.now()}@kristujayanti.com`, Date.now());
+
+  // Request UPI ride to driver without UPI ID
+  const upiReqToNoUpiDriver = store.createRequest({
+    offerId: noUpiOffer.id,
+    passengerId: brokeUpiPassengerId,
+    passengerName: "Broke UPI Passenger",
+    passengerRating: 5.0,
+    pickup: "Kristu Jayanti University",
+    pickupLat: 13.0583,
+    pickupLng: 77.6426,
+    dropoff: "Manyata Tech Park",
+    dropoffLat: 13.0458,
+    dropoffLng: 77.6206,
+    paymentMethod: "upi",
+  });
+
+  // Driver with no UPI ID cannot accept a UPI ride
+  const refuseAcceptRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: noUpiDriverId,
+    body: { requestId: upiReqToNoUpiDriver.id, action: "accept" },
+  });
+  assert.equal(refuseAcceptRes.status, 409);
+  assert.equal((await refuseAcceptRes.json()).error, "This driver doesn't accept UPI.");
+  store.cancelRequest(upiReqToNoUpiDriver.id, brokeUpiPassengerId);
+
+  // Now test UPI ride with a driver who HAS a UPI ID (DRIVER_CAR has "aarav.mehta@okaxis")
+  const upiReq = store.createRequest({
+    offerId: "offer_seed_001",
+    passengerId: brokeUpiPassengerId,
+    passengerName: "Broke UPI Passenger",
+    passengerRating: 5.0,
+    pickup: "Kristu Jayanti University",
+    pickupLat: 13.0583,
+    pickupLng: 77.6426,
+    dropoff: "Manyata Tech Park",
+    dropoffLat: 13.0458,
+    dropoffLng: 77.6206,
+    paymentMethod: "upi",
+  });
+  assert.equal(upiReq.paymentMethod, "upi");
+  assert.equal(upiReq.paymentStatus, "none");
+
+  // DRIVER_CAR accepts: should succeed even though passenger wallet balance is 0
+  const acceptRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: upiReq.id, action: "accept" },
+  });
+  assert.equal(acceptRes.status, 200, "accept succeeds for UPI ride without checking passenger wallet");
+
+  // Step through arrive -> verify_otp
+  await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: upiReq.id, action: "arrive" },
+  });
+  const otp = store.getRequest(upiReq.id).otp;
+  await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: upiReq.id, action: "verify_otp", otp },
+  });
+
+  // Record wallet balances before completion
+  const driverRowBefore = db.prepare("SELECT wallet_balance FROM users WHERE id = ?").get(DRIVER_CAR);
+  const passengerRowBefore = db.prepare("SELECT wallet_balance FROM users WHERE id = ?").get(brokeUpiPassengerId);
+
+  // Complete ride as driver
+  const completeRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: upiReq.id, action: "complete" },
+  });
+  assert.equal(completeRes.status, 200);
+  const completeData = await completeRes.json();
+  assert.equal(completeData.paymentMethod, "upi");
+  assert.equal(completeData.paymentStatus, "pending");
+  assert.equal(completeData.amountRupees, 75);
+  assert.ok(completeData.upiUri, "driver receives upiUri upon completion");
+  assert.ok(completeData.upiUri.includes("pa=aarav.mehta%40okaxis"));
+  assert.ok(completeData.upiUri.includes("am=75.00"));
+
+  // Check wallets: NOT changed for UPI rides
+  const driverRowAfter = db.prepare("SELECT wallet_balance FROM users WHERE id = ?").get(DRIVER_CAR);
+  const passengerRowAfter = db.prepare("SELECT wallet_balance FROM users WHERE id = ?").get(brokeUpiPassengerId);
+  assert.equal(driverRowAfter.wallet_balance, driverRowBefore.wallet_balance, "driver wallet unchanged for UPI");
+  assert.equal(passengerRowAfter.wallet_balance, passengerRowBefore.wallet_balance, "passenger wallet unchanged for UPI");
+
+  // Check trip history is recorded as Completed
+  const tripRow = db.prepare("SELECT * FROM trip_history WHERE request_id = ?").get(upiReq.id);
+  assert.ok(tripRow, "trip_history row recorded");
+  assert.equal(tripRow.status, "Completed");
+
+  // Privacy: Passenger endpoint must NEVER expose driver's UPI ID or upiUri
+  const passGetRes = await call(requestsRoute.GET, `/api/rides/requests?passengerId=${brokeUpiPassengerId}`, {
+    userId: brokeUpiPassengerId,
+  });
+  const passData = await passGetRes.json();
+  const passReqView = passData.requests.find((r) => r.id === upiReq.id);
+  assert.ok(passReqView);
+  assert.equal(passReqView.upiUri, undefined, "passenger request view never leaks upiUri");
+  assert.equal(passReqView.offer?.driverUpiId, undefined, "passenger offer view never leaks driver UPI ID");
+  assert.equal(JSON.stringify(passData).includes("aarav.mehta@okaxis"), false, "driver UPI ID never in passenger payload");
+
+  // Confirm payment: unauthorized user is rejected (403)
+  const nonDriverConfirmRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: brokeUpiPassengerId,
+    body: { requestId: upiReq.id, action: "confirm_payment" },
+  });
+  assert.equal(nonDriverConfirmRes.status, 403, "only accepting driver can confirm payment");
+
+  // Accepting driver confirms payment
+  const confirmRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: upiReq.id, action: "confirm_payment" },
+  });
+  assert.equal(confirmRes.status, 200);
+  const confirmData = await confirmRes.json();
+  assert.equal(confirmData.paymentStatus, "paid");
+
+  // In database, payment_status is 'paid' and payment_marked_at is a timestamp
+  const dbReq = db.prepare("SELECT payment_status, payment_marked_at FROM ride_requests WHERE id = ?").get(upiReq.id);
+  assert.equal(dbReq.payment_status, "paid");
+  assert.ok(typeof dbReq.payment_marked_at === "number" && dbReq.payment_marked_at > 0);
+
+  // Idempotent: confirming again succeeds and keeps paid status
+  const reConfirmRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: DRIVER_CAR,
+    body: { requestId: upiReq.id, action: "confirm_payment" },
+  });
+  assert.equal(reConfirmRes.status, 200);
+  assert.equal((await reConfirmRes.json()).paymentStatus, "paid");
+});
+
+test("Rider uploaded QR in profile settings: PATCH /api/auth/me saves QR, enables UPI ride accept, shows on completion, and never leaks to passenger", async () => {
+  const db = dbModule.getDb();
+  const sampleQr = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  const qrDriverId = `usr_qr_driver_${Date.now()}`;
+  db.prepare(`
+    INSERT INTO users (id, email, password_hash, name, university, rating, role, wallet_balance, student_id_verified, created_at, session_version, upi_id, upi_qr_image)
+    VALUES (?, ?, 'hash', 'QR Only Driver', 'Kristu Jayanti University', 5.0, 'both', 0, 1, ?, 1, NULL, NULL)
+  `).run(qrDriverId, `qrdriver_${Date.now()}@kristujayanti.com`, Date.now());
+
+  // Reject invalid QR payload
+  const badQrRes = await call(meRoute.PATCH, "/api/auth/me", {
+    method: "PATCH",
+    userId: qrDriverId,
+    body: { upiQrImage: "data:image/svg+xml;base64,PHN2Zz4=" },
+  });
+  assert.equal(badQrRes.status, 400);
+
+  // Upload valid QR image
+  const uploadQrRes = await call(meRoute.PATCH, "/api/auth/me", {
+    method: "PATCH",
+    userId: qrDriverId,
+    body: { upiQrImage: sampleQr },
+  });
+  assert.equal(uploadQrRes.status, 200);
+  const uploadData = await uploadQrRes.json();
+  assert.equal(uploadData.user.upiQrImage, sampleQr);
+
+  const offer = store.createOffer({
+    driverId: qrDriverId,
+    driverName: "QR Only Driver",
+    driverUniversity: "Kristu Jayanti University",
+    driverRating: 5.0,
+    vehicleType: "Bike",
+    vehicleModel: "TVS Apache",
+    vehicleNumber: "KA 04 QR 1234",
+    from: "Kristu Jayanti University",
+    fromLat: 13.0583,
+    fromLng: 77.6426,
+    to: "Manyata Tech Park",
+    toLat: 13.045,
+    toLng: 77.62,
+    farePerSeat: "35",
+    seats: 1,
+    departureTime: "Immediate",
+    departureDate: "Today",
+  });
+
+  const qrPassengerId = `usr_qr_pass_${Date.now()}`;
+  db.prepare(`
+    INSERT INTO users (id, email, password_hash, name, university, rating, role, wallet_balance, student_id_verified, created_at, session_version)
+    VALUES (?, ?, 'hash', 'QR Passenger', 'Kristu Jayanti University', 5.0, 'passenger', 0, 1, ?, 1)
+  `).run(qrPassengerId, `qrpass_${Date.now()}@kristujayanti.com`, Date.now());
+
+  const req = store.createRequest({
+    offerId: offer.id,
+    passengerId: qrPassengerId,
+    passengerName: "QR Passenger",
+    passengerRating: 5.0,
+    pickup: "Kristu Jayanti University",
+    pickupLat: 13.0583,
+    pickupLng: 77.6426,
+    dropoff: "Manyata Tech Park",
+    dropoffLat: 13.0458,
+    dropoffLng: 77.6206,
+    paymentMethod: "upi",
+  });
+
+  // Driver with uploaded QR (and no upiId) can accept UPI ride
+  const acceptRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: qrDriverId,
+    body: { requestId: req.id, action: "accept" },
+  });
+  assert.equal(acceptRes.status, 200);
+
+  await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: qrDriverId,
+    body: { requestId: req.id, action: "arrive" },
+  });
+  const otp = store.getRequest(req.id).otp;
+  await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: qrDriverId,
+    body: { requestId: req.id, action: "verify_otp", otp },
+  });
+
+  const completeRes = await call(respondRoute.PATCH, "/api/rides/requests/respond", {
+    method: "PATCH",
+    userId: qrDriverId,
+    body: { requestId: req.id, action: "complete" },
+  });
+  assert.equal(completeRes.status, 200);
+  const completeData = await completeRes.json();
+  assert.equal(completeData.paymentMethod, "upi");
+  assert.equal(completeData.paymentStatus, "pending");
+  assert.equal(completeData.driverQrImage, sampleQr, "driver receives uploaded QR on completion");
+
+  // Passenger view must NEVER expose driverQrImage
+  const passGetRes = await call(requestsRoute.GET, `/api/rides/requests?passengerId=${qrPassengerId}`, {
+    userId: qrPassengerId,
+  });
+  const passData = await passGetRes.json();
+  assert.equal(JSON.stringify(passData).includes(sampleQr), false, "driver QR image never leaks to passenger");
+});
+
+test("Admin login (admin@kristujayanti.com / 12345678) returns isAdmin user and accesses /api/admin/overview while blocking non-admins", async () => {
+  const loginRes = await call(loginRoute.POST, "/api/auth/login", {
+    method: "POST",
+    body: { email: "admin@kristujayanti.com", password: "12345678" },
+  });
+  assert.equal(loginRes.status, 200);
+  const loginData = await loginRes.json();
+  assert.equal(loginData.user.email, "admin@kristujayanti.com");
+  assert.equal(loginData.user.isAdmin, true);
+
+  // Non-admin passenger gets 403
+  const forbiddenRes = await call(adminOverviewRoute.GET, "/api/admin/overview", {
+    userId: PASSENGER,
+  });
+  assert.equal(forbiddenRes.status, 403);
+
+  // Admin gets 200 and full overview payload
+  const adminRes = await call(adminOverviewRoute.GET, "/api/admin/overview", {
+    userId: loginData.user.id,
+  });
+  assert.equal(adminRes.status, 200);
+  const overview = await adminRes.json();
+  assert.ok(typeof overview.stats.totalUsers === "number");
+  assert.ok(Array.isArray(overview.users));
+  assert.ok(Array.isArray(overview.offers));
+  assert.ok(Array.isArray(overview.requests));
+  assert.ok(Array.isArray(overview.ratings));
+});
+
+test("Student ID Card OCR verification checks (a) Institution keyword, (b) Student Name match, and (c) Expiration / Academic year for both Rider and Passenger", async () => {
+  limiters.registerGlobal.reset("global:register");
+  // 1. Direct unit check of all 3 conditions
+  const validText =
+    "KRISTU JAYANTI UNIVERSITY - Autonomous Institution & College\nStudent Name: Rohan Varma\nRoll No: 24BCAC88\nAcademic Year: 2024 - 2027\nValid Thru: 05/2027";
+  const passAll = studentIdVerifier.verifyStudentIdText({
+    extractedText: validText,
+    registeredName: "Rohan Varma",
+    referenceYear: 2025,
+  });
+  assert.equal(passAll.verified, true, "all 3 conditions match");
+  assert.equal(passAll.checks.institution.passed, true);
+  assert.equal(passAll.checks.name.passed, true);
+  assert.equal(passAll.checks.expiration.passed, true);
+
+  // Condition (a) failure: no University / Institution / College keyword
+  const noInstitution = studentIdVerifier.verifyStudentIdText({
+    extractedText: "CITY SPORTS CLUB\nMember Name: Rohan Varma\nValid Thru: 2027",
+    registeredName: "Rohan Varma",
+    referenceYear: 2025,
+  });
+  assert.equal(noInstitution.verified, false);
+  assert.equal(noInstitution.checks.institution.passed, false);
+  assert.equal(noInstitution.checks.name.passed, true);
+  assert.equal(noInstitution.checks.expiration.passed, true);
+
+  // Condition (b) failure: name on ID card does not match registered name
+  const wrongName = studentIdVerifier.verifyStudentIdText({
+    extractedText: validText,
+    registeredName: "Ananya Nair",
+    referenceYear: 2025,
+  });
+  assert.equal(wrongName.verified, false);
+  assert.equal(wrongName.checks.institution.passed, true);
+  assert.equal(wrongName.checks.name.passed, false);
+  assert.equal(wrongName.checks.expiration.passed, true);
+
+  // Condition (c) failure: expired academic year (2019-2022)
+  const expiredCard = studentIdVerifier.verifyStudentIdText({
+    extractedText:
+      "Kristu Jayanti College\nStudent Name: Rohan Varma\nAcademic Year: 2019 - 2022",
+    registeredName: "Rohan Varma",
+    referenceYear: 2025,
+  });
+  assert.equal(expiredCard.verified, false);
+  assert.equal(expiredCard.checks.institution.passed, true);
+  assert.equal(expiredCard.checks.name.passed, true);
+  assert.equal(expiredCard.checks.expiration.passed, false);
+
+  // 2. Test /api/auth/verify-id-card with base64 SVG ID card image
+  const makeSvgIdCard = (textLines) => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="360"><text>${textLines.join(" | ")}</text></svg>`;
+    return `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`;
+  };
+
+  const validCardImage = makeSvgIdCard([
+    "Kristu Jayanti University",
+    "Student Name: Meera Krishnan",
+    "Roll No: 24BCAC77",
+    "Batch: 2024 - 2027",
+  ]);
+
+  const apiCheckRes = await call(verifyIdCardRoute.POST, "/api/auth/verify-id-card", {
+    method: "POST",
+    body: {
+      idCardImage: validCardImage,
+      registeredName: "Meera Krishnan",
+      registeredRollNumber: "24BCAC77",
+    },
+  });
+  assert.equal(apiCheckRes.status, 200);
+  const apiCheckData = await apiCheckRes.json();
+  assert.equal(apiCheckData.verified, true);
+  assert.equal(apiCheckData.checks.rollNumber.passed, true);
+
+  // Incorrect roll number in the textbox must fail verification
+  const wrongRollRes = await call(verifyIdCardRoute.POST, "/api/auth/verify-id-card", {
+    method: "POST",
+    body: {
+      idCardImage: validCardImage,
+      registeredName: "Meera Krishnan",
+      registeredRollNumber: "24BCAC99",
+    },
+  });
+  assert.equal(wrongRollRes.status, 422, "Mismatched roll number in textbox fails verification");
+  const wrongRollData = await wrongRollRes.json();
+  assert.equal(wrongRollData.verified, false);
+  assert.equal(wrongRollData.checks.rollNumber.passed, false);
+
+  // 3. Test Passenger Registration with Valid ID Card -> Automatically verified + session cookie issued
+  const passengerEmail = `id.passenger.${Date.now()}@kristujayanti.com`;
+  const passRegRes = await call(registerRoute.POST, "/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Meera Krishnan",
+      email: passengerEmail,
+      password: "password123",
+      role: "passenger",
+      studentRollNumber: "24BCAC77",
+      idCardImage: validCardImage,
+      requireIdCardVerification: true,
+    },
+  });
+  assert.equal(passRegRes.status, 201);
+  const passRegData = await passRegRes.json();
+  assert.equal(passRegData.user.studentIdVerified, true, "Passenger automatically verified after 3-point ID check");
+  assert.equal(passRegData.verificationRequired, false);
+  assert.ok(passRegRes.headers.get("set-cookie")?.includes("hopon_session="), "Verified passenger receives session cookie immediately");
+
+  // 4. Test Rider ('both') Registration with Valid ID Card -> Automatically verified with 'both' role unlocked
+  const riderEmail = `id.rider.${Date.now()}@kristujayanti.com`;
+  const riderCardImage = makeSvgIdCard([
+    "Kristu Jayanti Institution of Management",
+    "Student Name: Vikram Aditya",
+    "Roll No: 25MBA102",
+    "Academic Year: 2025 - 2028",
+  ]);
+  const riderRegRes = await call(registerRoute.POST, "/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Vikram Aditya",
+      email: riderEmail,
+      password: "password123",
+      role: "both",
+      studentRollNumber: "25MBA102",
+      vehicleType: "Bike",
+      vehicleModel: "TVS Apache RTR",
+      vehicleNumber: "KA 03 MN 8899",
+      idCardImage: riderCardImage,
+      requireIdCardVerification: true,
+    },
+  });
+  assert.equal(riderRegRes.status, 201);
+  const riderRegData = await riderRegRes.json();
+  assert.equal(riderRegData.user.studentIdVerified, true, "Rider automatically verified after 3-point ID check");
+  assert.equal(riderRegData.user.role, "both", "Rider role unlocked immediately upon ID card verification");
+
+  // 5. Test Registration rejected when ID card fails verification (e.g. expired card)
+  const expiredCardImage = makeSvgIdCard([
+    "Kristu Jayanti College",
+    "Student Name: Expired Student",
+    "Academic Year: 2018 - 2021",
+  ]);
+  const failRegRes = await call(registerRoute.POST, "/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Expired Student",
+      email: `id.expired.${Date.now()}@kristujayanti.com`,
+      password: "password123",
+      role: "passenger",
+      idCardImage: expiredCardImage,
+      requireIdCardVerification: true,
+    },
+  });
+  assert.equal(failRegRes.status, 400, "Expired ID card blocks registration verification");
+  const failRegData = await failRegRes.json();
+  assert.equal(failRegData.idVerification.verified, false);
+  assert.equal(failRegData.idVerification.checks.expiration.passed, false);
+});
+
 
 
 

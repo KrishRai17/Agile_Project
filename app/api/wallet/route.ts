@@ -41,7 +41,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const amount = typeof body.amount === "number" ? Math.round(body.amount) : Number(body.amount);
+  const rawAmount = Number(body.amount);
+  const amount = Number.isFinite(rawAmount) ? Math.round(rawAmount) : NaN;
   if (!Number.isFinite(amount) || amount <= 0 || amount > 5000) {
     return NextResponse.json(
       { error: "Amount must be between ₹1 and ₹5,000." },

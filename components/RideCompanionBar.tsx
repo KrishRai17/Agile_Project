@@ -314,14 +314,14 @@ export default function RideCompanionBar({
             </div>
             <div className="min-w-0 flex-1 space-y-1">
               <p className="text-xs font-bold text-slate-900">
-                HopOn Student Wallet Settlement
+                HopOn Campus Fare Settlement
               </p>
               <p className="text-[11px] text-slate-500">
-                ₹{numericFare} auto-transfers from passenger wallet to driver upon dropoff.
+                ₹{numericFare} settled upon dropoff via UPI QR or HopOn Wallet.
               </p>
               <div className="mt-1 py-1 px-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-semibold flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                <span>Zero cash needed · Verified campus student ledger</span>
+                <span>Upfront student fare · Verified campus trip</span>
               </div>
             </div>
           </div>

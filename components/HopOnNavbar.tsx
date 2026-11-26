@@ -65,7 +65,7 @@ export default function HopOnNavbar({
   const navTabs = [
     { id: "find" as const, label: "Find a ride", icon: Car, driverOnly: false },
     { id: "my-rides" as const, label: "My rides", icon: CalendarDays, driverOnly: false },
-    { id: "wallet" as const, label: "Wallet", icon: Wallet, driverOnly: false },
+    ...(canOfferRide ? [{ id: "wallet" as const, label: "Wallet", icon: Wallet, driverOnly: true }] : []),
     ...(canOfferRide ? [{ id: "offer" as const, label: "Offer a ride", icon: PlusCircle, driverOnly: true }] : []),
   ];
 
@@ -172,9 +172,18 @@ export default function HopOnNavbar({
                 className="flex items-center gap-2 p-1.5 px-3 rounded-full hover:bg-slate-100 border border-slate-200 transition-all cursor-pointer"
                 aria-label="User Profile"
               >
-                <div className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center font-bold text-[10px] tracking-tight">
-                  {user.name.charAt(0).toUpperCase()}
-                </div>
+                {user.avatarUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={user.avatarUrl}
+                    alt={user.name}
+                    className="w-6 h-6 rounded-full object-cover border border-slate-200"
+                  />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center font-bold text-[10px] tracking-tight">
+                    {user.name.charAt(0).toUpperCase()}
+                  </div>
+                )}
                 <span className="text-xs font-semibold text-slate-800">
                   {user.name.split(" ")[0]}
                 </span>
@@ -187,9 +196,18 @@ export default function HopOnNavbar({
                   {/* User Overview */}
                   <div className="px-4 py-2 border-b border-slate-100">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 text-white font-bold flex items-center justify-center text-sm shadow-sm">
-                        {user.name.slice(0, 2).toUpperCase()}
-                      </div>
+                      {user.avatarUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={user.avatarUrl}
+                          alt={user.name}
+                          className="w-10 h-10 rounded-full object-cover border border-slate-200 shadow-sm shrink-0"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 text-white font-bold flex items-center justify-center text-sm shadow-sm shrink-0">
+                          {user.name.slice(0, 2).toUpperCase()}
+                        </div>
+                      )}
                       <div className="min-w-0">
                         <p className="text-sm font-bold text-slate-900 truncate">{user.name}</p>
                         <p className="text-xs text-slate-500 truncate">{user.email}</p>
@@ -204,18 +222,27 @@ export default function HopOnNavbar({
                         ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
                         : "bg-slate-100 text-slate-600 border border-slate-200"
                     }`}>
-                      {isDriver ? "🚗 Student Driver" : "🎒 Student Rider"}
+                      {isDriver ? "🚗 Student Rider" : "🎒 Student Passenger"}
                     </div>
                   </div>
 
-                  {/* Wallet Balance */}
-                  <div className="px-4 py-2.5 flex items-center justify-between border-b border-slate-100 hover:bg-slate-50 cursor-pointer">
-                    <div className="flex items-center gap-2.5 text-xs font-semibold text-slate-700">
-                      <Wallet className="w-4 h-4 text-blue-600" />
-                      <span>Student Wallet</span>
-                    </div>
-                    <span className="text-xs font-bold text-blue-600">₹{Number(user.walletBalance ?? 0).toFixed(2)}</span>
-                  </div>
+                  {/* Wallet Balance (drivers/riders only) */}
+                  {canOfferRide && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProfileOpen(false);
+                        onTabChange("wallet");
+                      }}
+                      className="w-full px-4 py-2.5 flex items-center justify-between border-b border-slate-100 hover:bg-slate-50 cursor-pointer text-left"
+                    >
+                      <div className="flex items-center gap-2.5 text-xs font-semibold text-slate-700">
+                        <Wallet className="w-4 h-4 text-blue-600" />
+                        <span>Student Wallet</span>
+                      </div>
+                      <span className="text-xs font-bold text-blue-600">₹{Number(user.walletBalance ?? 0).toFixed(2)}</span>
+                    </button>
+                  )}
 
                   {/* Actions */}
                   <div className="py-1">

@@ -6,9 +6,11 @@
 import { randomBytes, randomInt } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { isDemoEnabled, isDriverVerified } from "./accounts";
+import { getUserById, isDemoEnabled, isDriverVerified } from "./accounts";
 import { getDb, recordWalletLedger } from "./db";
 import { haversineKm, KJU_COORDS } from "./campus";
+import { buildUpiUri } from "./upi";
+import { parseFare } from "./validate";
 
 export type RideOfferStatus = "active" | "full" | "cancelled";
 export type RideRequestStatus = "pending" | "accepted" | "rejected" | "cancelled" | "completed";
@@ -70,6 +72,9 @@ export interface RideRequest {
   arrivedAt?: number;
   startedAt?: number;
   completedAt?: number;
+  paymentMethod: "wallet" | "upi";
+  paymentStatus: "none" | "wallet_paid" | "pending" | "paid";
+  paymentMarkedAt?: number;
   createdAt: number;
   respondedAt?: number;
 }
@@ -229,6 +234,9 @@ interface DbRequestRow {
   arrived_at: number | null;
   started_at: number | null;
   completed_at: number | null;
+  payment_method: string | null;
+  payment_status: string | null;
+  payment_marked_at: number | null;
   created_at: number;
   responded_at: number | null;
 }
@@ -301,8 +309,8 @@ function saveRequestToDb(req: RideRequest, emit: boolean = true): void {
         id, offer_id, declined_by, passenger_id, passenger_name, passenger_rating,
         pickup, pickup_lat, pickup_lng, dropoff, dropoff_lat, dropoff_lng,
         status, note, agreed_fare, otp, otp_attempts, otp_locked_until, share_token,
-        trip_stage, arrived_at, started_at, completed_at, created_at, responded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        trip_stage, arrived_at, started_at, completed_at, payment_method, payment_status, payment_marked_at, created_at, responded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       req.id,
       req.offerId ?? null,
@@ -327,6 +335,9 @@ function saveRequestToDb(req: RideRequest, emit: boolean = true): void {
       req.arrivedAt ?? null,
       req.startedAt ?? null,
       req.completedAt ?? null,
+      req.paymentMethod ?? "wallet",
+      req.paymentStatus ?? "none",
+      req.paymentMarkedAt ?? null,
       req.createdAt,
       req.respondedAt ?? null
     );
@@ -381,7 +392,8 @@ function recordTripHistory(req: RideRequest, offer: RideOffer | undefined, statu
     const db = getDb();
     const id = `trip_${Date.now()}_${randomInt(1000, 9999)}`;
     const vehicle = offer ? `HopOn ${offer.vehicleType} (${offer.vehicleModel})` : "HopOn Campus Ride";
-    const amount = `₹${offer?.farePerSeat ?? "50"}`;
+    const cleanFare = String(offer?.farePerSeat ?? "50").trim().replace(/^₹\s*/, "");
+    const amount = `₹${cleanFare}`;
     db.prepare(
       `INSERT INTO trip_history (
         id, request_id, offer_id, passenger_id, passenger_name,
@@ -480,6 +492,14 @@ function hydrateFromSqlite(target: HoponStore): void {
         arrivedAt: r.arrived_at ?? undefined,
         startedAt: r.started_at ?? undefined,
         completedAt: r.completed_at ?? undefined,
+        paymentMethod: r.payment_method === "upi" ? "upi" : "wallet",
+        paymentStatus:
+          r.payment_status === "wallet_paid" ||
+          r.payment_status === "pending" ||
+          r.payment_status === "paid"
+            ? r.payment_status
+            : "none",
+        paymentMarkedAt: r.payment_marked_at ?? undefined,
         createdAt: r.created_at,
         respondedAt: r.responded_at ?? undefined,
       });
@@ -829,6 +849,12 @@ export interface DriverRideRequestView {
   dropoffLat: number;
   dropoffLng: number;
   status: RideRequestStatus;
+  paymentMethod: "wallet" | "upi";
+  paymentStatus: "none" | "wallet_paid" | "pending" | "paid";
+  paymentMarkedAt?: number;
+  amountRupees: number;
+  upiUri?: string;
+  driverQrImage?: string;
   note?: string;
   agreedFare?: string;
   tripStage?: RideTripStage;
@@ -872,6 +898,31 @@ export function toDriverView(req: RideRequest): DriverRideRequestView {
     ? req.dropoff
     : req.dropoff.replace(/\s*\([^)]*\)/g, "").trim();
 
+  const agreedFareStr = req.agreedFare ?? offer?.farePerSeat ?? "0";
+  const parsedFare = parseFare(agreedFareStr);
+  const amountRupees = parsedFare ? Number(parsedFare) : 0;
+
+  let upiUri: string | undefined;
+  let driverQrImage: string | undefined;
+  if (req.paymentMethod === "upi" && req.paymentStatus === "pending" && offer?.driverId) {
+    const driver = getUserById(offer.driverId);
+    if (driver?.upiQrImage) {
+      driverQrImage = driver.upiQrImage;
+    }
+    if (driver?.upiId) {
+      try {
+        upiUri = buildUpiUri({
+          vpa: driver.upiId,
+          payeeName: driver.name,
+          amountRupees,
+          requestId: req.id,
+        });
+      } catch {
+        // invalid VPA or amount
+      }
+    }
+  }
+
   return {
     id: req.id,
     offerId: req.offerId,
@@ -884,6 +935,12 @@ export function toDriverView(req: RideRequest): DriverRideRequestView {
     dropoffLat,
     dropoffLng,
     status: req.status,
+    paymentMethod: req.paymentMethod ?? "wallet",
+    paymentStatus: req.paymentStatus ?? "none",
+    amountRupees,
+    ...(upiUri ? { upiUri } : {}),
+    ...(driverQrImage ? { driverQrImage } : {}),
+    ...(req.paymentMarkedAt !== undefined ? { paymentMarkedAt: req.paymentMarkedAt } : {}),
     ...(isAcceptedOrBeyond && req.note !== undefined ? { note: req.note } : {}),
     ...(req.agreedFare !== undefined ? { agreedFare: req.agreedFare } : {}),
     ...(req.tripStage !== undefined ? { tripStage: req.tripStage } : {}),
@@ -909,8 +966,10 @@ export function getRequest(id: string): RideRequest | undefined {
  * (the passenger no longer picks the driver). With `offerId` it is addressed to that offer.
  */
 export function createRequest(
-  data: Omit<RideRequest, "id" | "createdAt" | "status" | "offerId" | "declinedBy"> & {
+  data: Omit<RideRequest, "id" | "createdAt" | "status" | "offerId" | "declinedBy" | "paymentStatus"> & {
     offerId?: string | null;
+    paymentMethod?: "wallet" | "upi";
+    paymentStatus?: "none" | "wallet_paid" | "pending" | "paid";
   }
 ): RideRequest | { error: string } {
   pruneStore();
@@ -937,6 +996,8 @@ export function createRequest(
     id,
     status: "pending",
     declinedBy: [],
+    paymentMethod: data.paymentMethod === "upi" ? "upi" : "wallet",
+    paymentStatus: data.paymentStatus ?? "none",
     createdAt: Date.now(),
   };
   requests.set(id, req);
@@ -1034,6 +1095,23 @@ export function respondToRequest(
             fareNum = Math.max(30, Math.round(15 + 5 * distKm));
           }
 
+          // Validate payment eligibility before persisting an auto-created offer
+          if (req.paymentMethod === "upi") {
+            const driverUser = getUserById(driverId);
+            if (!driverUser?.upiId && !driverUser?.upiQrImage) {
+              return { error: "This driver doesn't accept UPI." };
+            }
+          } else if (fareNum > 0) {
+            const pRow = db
+              .prepare("SELECT wallet_balance FROM users WHERE id = ?")
+              .get(req.passengerId) as { wallet_balance: number } | undefined;
+            if (pRow && pRow.wallet_balance < fareNum) {
+              return {
+                error: "Passenger has insufficient HopOn Wallet balance to cover this ride fare.",
+              };
+            }
+          }
+
           offer = createOffer({
             driverId,
             driverName: userRow.name || "Student Driver",
@@ -1051,7 +1129,7 @@ export function respondToRequest(
             departureTime: "Immediate",
             departureDate: new Date().toISOString().split("T")[0],
             seats: 1,
-            farePerSeat: `₹${fareNum}`,
+            farePerSeat: String(fareNum),
           });
         }
       } catch (err) {
@@ -1062,18 +1140,25 @@ export function respondToRequest(
   }
 
   if (action === "accept") {
-    const numericFare = Math.max(
-      0,
-      Math.round(Number(String(offer.farePerSeat ?? "0").replace(/[^\d.]/g, "")) || 0)
-    );
-    if (numericFare > 0) {
-      const pRow = getDb()
-        .prepare("SELECT wallet_balance FROM users WHERE id = ?")
-        .get(req.passengerId) as { wallet_balance: number } | undefined;
-      if (pRow && pRow.wallet_balance < numericFare) {
-        return {
-          error: "Passenger has insufficient HopOn Wallet balance to cover this ride fare.",
-        };
+    if (req.paymentMethod === "upi") {
+      const driverUser = getUserById(driverId);
+      if (!driverUser?.upiId && !driverUser?.upiQrImage) {
+        return { error: "This driver doesn't accept UPI." };
+      }
+    } else {
+      const numericFare = Math.max(
+        0,
+        Math.round(Number(String(offer.farePerSeat ?? "0").replace(/[^\d.]/g, "")) || 0)
+      );
+      if (numericFare > 0) {
+        const pRow = getDb()
+          .prepare("SELECT wallet_balance FROM users WHERE id = ?")
+          .get(req.passengerId) as { wallet_balance: number } | undefined;
+        if (pRow && pRow.wallet_balance < numericFare) {
+          return {
+            error: "Passenger has insufficient HopOn Wallet balance to cover this ride fare.",
+          };
+        }
       }
     }
     req.offerId = offer.id;
@@ -1246,9 +1331,8 @@ export function completeRide(
   const now = Date.now();
   const tripId = `trip_${now}_${randomInt(1000, 9999)}`;
   const vehicle = `HopOn ${offer.vehicleType} (${offer.vehicleModel})`;
-  const amount = `₹${agreedFareStr}`;
-
-  const MAX_COUNTERPARTY_COMPLETIONS_24H = 5;
+  const cleanFare = String(agreedFareStr).trim().replace(/^₹\s*/, "");
+  const amount = `₹${cleanFare}`;
 
   const db = getDb();
   const tx = db.transaction(() => {
@@ -1260,54 +1344,48 @@ export function completeRide(
       throw new Error("This ride has already been completed.");
     }
 
-    // 2. Anti-collusion / siphon check: limit repeated rides between the same counterparty within 24 hours
-    const recentPairTrips = db
-      .prepare(
-        `SELECT COUNT(*) as count FROM trip_history
-         WHERE passenger_id = ? AND driver_id = ? AND created_at > ? AND status = 'Completed'`
-      )
-      .get(req.passengerId, offer.driverId, now - 24 * 60 * 60 * 1000) as { count: number } | undefined;
-    if (recentPairTrips && recentPairTrips.count >= MAX_COUNTERPARTY_COMPLETIONS_24H) {
-      throw new Error("Daily ride limit between this driver and passenger reached for campus safety.");
-    }
+    const isUpi = req.paymentMethod === "upi";
+    const paymentStatus = isUpi ? "pending" : "wallet_paid";
 
-    const pRow = db
-      .prepare("SELECT wallet_balance FROM users WHERE id = ?")
-      .get(req.passengerId) as { wallet_balance: number } | undefined;
-    if (pRow && numericFare > 0) {
-      if (pRow.wallet_balance < numericFare) {
-        throw new Error("Insufficient HopOn Wallet balance for passenger.");
-      }
-      db.prepare("UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?").run(
-        numericFare,
-        req.passengerId
-      );
-      recordWalletLedger(db, {
-        userId: req.passengerId,
-        delta: -numericFare,
-        reason: "ride_fare_debit",
-        actorId: offer.driverId,
-        ref: req.id,
-        balanceAfter: pRow.wallet_balance - numericFare,
-      });
-
-      const dRow = db
+    if (!isUpi) {
+      const pRow = db
         .prepare("SELECT wallet_balance FROM users WHERE id = ?")
-        .get(offer.driverId) as { wallet_balance: number } | undefined;
-      const dBalanceAfter = (dRow?.wallet_balance ?? 0) + numericFare;
+        .get(req.passengerId) as { wallet_balance: number } | undefined;
+      if (pRow && numericFare > 0) {
+        if (pRow.wallet_balance < numericFare) {
+          throw new Error("Insufficient HopOn Wallet balance for passenger.");
+        }
+        db.prepare("UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?").run(
+          numericFare,
+          req.passengerId
+        );
+        recordWalletLedger(db, {
+          userId: req.passengerId,
+          delta: -numericFare,
+          reason: "ride_fare_debit",
+          actorId: offer.driverId,
+          ref: req.id,
+          balanceAfter: pRow.wallet_balance - numericFare,
+        });
 
-      db.prepare("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?").run(
-        numericFare,
-        offer.driverId
-      );
-      recordWalletLedger(db, {
-        userId: offer.driverId,
-        delta: numericFare,
-        reason: "ride_fare_credit",
-        actorId: req.passengerId,
-        ref: req.id,
-        balanceAfter: dBalanceAfter,
-      });
+        const dRow = db
+          .prepare("SELECT wallet_balance FROM users WHERE id = ?")
+          .get(offer.driverId) as { wallet_balance: number } | undefined;
+        const dBalanceAfter = (dRow?.wallet_balance ?? 0) + numericFare;
+
+        db.prepare("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?").run(
+          numericFare,
+          offer.driverId
+        );
+        recordWalletLedger(db, {
+          userId: offer.driverId,
+          delta: numericFare,
+          reason: "ride_fare_credit",
+          actorId: req.passengerId,
+          ref: req.id,
+          balanceAfter: dBalanceAfter,
+        });
+      }
     }
 
     db.prepare(
@@ -1340,9 +1418,9 @@ export function completeRide(
     // Atomic update of ride_requests in SQLite inside the same transaction
     db.prepare(
       `UPDATE ride_requests
-       SET status = 'completed', completed_at = ?, responded_at = ?
+       SET status = 'completed', payment_status = ?, completed_at = ?, responded_at = ?
        WHERE id = ?`
-    ).run(now, now, req.id);
+    ).run(paymentStatus, now, now, req.id);
 
     // Atomic update of ride_offers seats in SQLite inside the same transaction
     db.prepare(
@@ -1361,6 +1439,7 @@ export function completeRide(
   }
 
   req.status = "completed";
+  req.paymentStatus = req.paymentMethod === "upi" ? "pending" : "wallet_paid";
   req.completedAt = now;
   req.respondedAt = now;
   requests.set(requestId, req);
@@ -1369,6 +1448,61 @@ export function completeRide(
   if (offer.status === "full") offer.status = "active";
   offers.set(offer.id, offer);
 
+  schedulePersist();
+  return req;
+}
+
+/**
+ * Driver confirms receipt of in-person UPI payment.
+ * Only the accepting driver can confirm it, only when status is 'completed' and payment_status is 'pending'.
+ * Idempotent when already 'paid'. Sets payment_status to 'paid' and payment_marked_at.
+ */
+export function confirmPayment(
+  requestId: string,
+  driverId: string
+): RideRequest | { error: string } {
+  const req = requests.get(requestId);
+  if (!req) return { error: "Request not found." };
+  const offer = req.offerId ? offers.get(req.offerId) : undefined;
+  if (!offer || offer.driverId !== driverId) {
+    return { error: "Not authorised." };
+  }
+  if (req.status !== "completed") {
+    return { error: "Ride is not completed yet." };
+  }
+  if (req.paymentStatus === "paid") {
+    return req; // idempotent
+  }
+  if (req.paymentStatus !== "pending") {
+    return { error: "Payment is not in pending status." };
+  }
+
+  const now = Date.now();
+  req.paymentStatus = "paid";
+  req.paymentMarkedAt = now;
+
+  const db = getDb();
+  db.prepare(
+    "UPDATE ride_requests SET payment_status = 'paid', payment_marked_at = ? WHERE id = ?"
+  ).run(now, req.id);
+
+  try {
+    db.prepare(`
+      INSERT INTO verification_audit (id, student_email, roll_number, method, ip, created_at)
+      VALUES (?, ?, ?, 'upi_payment_confirmed', 'server', ?)
+    `).run(
+      `aud_${Date.now()}_${randomBytes(3).toString("hex")}`,
+      offer.driverId,
+      req.id,
+      now
+    );
+  } catch {
+    // non-fatal
+  }
+
+  requests.set(requestId, req);
+  saveRequestToDb(req, false);
+  emitRideEvent("request", { requestId: req.id, userId: req.passengerId });
   schedulePersist();
   return req;
 }

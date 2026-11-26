@@ -3,12 +3,13 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { syncSession, User } from "@/lib/auth";
+import { isAdminUser, syncSession, User } from "@/lib/auth";
 import HopOnNavbar from "@/components/HopOnNavbar";
 import GetRidePanel from "@/components/GetRidePanel";
 import MapWrapper from "@/components/MapWrapper";
 import ActivityModal from "@/components/ActivityModal";
 import RatingModal from "@/components/RatingModal";
+import DriverPaymentModal from "@/components/DriverPaymentModal";
 import UpcomingRide from "@/components/UpcomingRide";
 import QuickActionCard from "@/components/QuickActionCard";
 import UserDashboardView from "@/components/UserDashboardView";
@@ -117,6 +118,36 @@ export default function HomePage() {
     targetName: string;
     targetRole: "driver" | "passenger";
     fare?: string;
+    pickup?: string;
+    dropoff?: string;
+    vehicleModel?: string;
+    vehicleNumber?: string;
+    paymentMethod?: "wallet" | "upi";
+  } | null>(null);
+  const [pendingRatingTarget, setPendingRatingTarget] = useState<{
+    requestId: string;
+    targetUserId: string;
+    targetName: string;
+    targetRole: "driver" | "passenger";
+    fare?: string;
+    pickup?: string;
+    dropoff?: string;
+    vehicleModel?: string;
+    vehicleNumber?: string;
+    paymentMethod?: "wallet" | "upi";
+  } | null>(null);
+  const [driverPaymentData, setDriverPaymentData] = useState<{
+    isOpen: boolean;
+    requestId: string;
+    from: string;
+    dropoff: string;
+    passengerName: string;
+    fare: string;
+    amountRupees: number;
+    paymentMethod: "wallet" | "upi";
+    paymentStatus: "none" | "wallet_paid" | "pending" | "paid";
+    upiUri?: string;
+    driverQrImage?: string;
   } | null>(null);
 
   // Selected Pickup and Dropoff locations
@@ -125,8 +156,9 @@ export default function HomePage() {
   });
   const [dropoff, setDropoff] = useState<LocationItem | null>(null);
 
-  // Driver cars state
+  // Driver cars state (only displayed when real accounts offer rides)
   const [driverCars, setDriverCars] = useState<DriverCar[]>(INITIAL_DRIVER_CARS);
+  const [matchingRidesCount, setMatchingRidesCount] = useState(0);
 
   // Real road distance/duration reported by the map (matched to endpoints)
   const [routeInfo, setRouteInfo] = useState<{
@@ -237,7 +269,7 @@ export default function HomePage() {
       const versionAtStart = manualPickupVersionRef.current;
       const applyPickup = (item: LocationItem) => {
         // Drop the result if the user picked a pickup while we were reverse-geocoding
-        if (!force && manualPickupVersionRef.current !== versionAtStart) return;
+        if (manualPickupVersionRef.current !== versionAtStart) return;
         setPickup(item);
       };
 
@@ -289,7 +321,10 @@ export default function HomePage() {
 
       setActiveAcceptedRide((prev) => {
         if (!prev) return null;
-        if (user.role === "driver") {
+        const isActingAsDriver =
+          prev.driverId === user.id ||
+          (user.role === "driver" && prev.passengerId !== user.id);
+        if (isActingAsDriver) {
           return {
             ...prev,
             driverLocation: {
@@ -319,6 +354,7 @@ export default function HomePage() {
   const activeDriverId = activeAcceptedRide?.driverId;
   const activePassengerId = activeAcceptedRide?.passengerId;
   const userRole = user?.role;
+  const currentUserId = user?.id;
 
   // Continuously watch real device GPS movement when signed in so both rider and passenger move live
   useEffect(() => {
@@ -349,7 +385,10 @@ export default function HomePage() {
   // - Driver tracks Passenger's real-time GPS location (until passenger boards at OTP verification)
   useEffect(() => {
     if (!activeRequestId) return;
-    const targetUserId = userRole === "driver" ? activePassengerId : activeDriverId;
+    const isActingAsDriver =
+      (Boolean(currentUserId) && activeDriverId === currentUserId) ||
+      (userRole === "driver" && activePassengerId !== currentUserId);
+    const targetUserId = isActingAsDriver ? activePassengerId : activeDriverId;
     if (!targetUserId) return;
 
     const syncCounterpartyLocation = async () => {
@@ -361,7 +400,7 @@ export default function HomePage() {
           const { lat, lng } = data.location;
           setActiveAcceptedRide((prev) => {
             if (!prev) return null;
-            if (userRole === "driver") {
+            if (isActingAsDriver) {
               if (prev.tripStage === "in_progress") return prev;
               const dLat = Math.abs(prev.pickupLocation.lat - lat);
               const dLng = Math.abs(prev.pickupLocation.lng - lng);
@@ -422,7 +461,7 @@ export default function HomePage() {
           if (typeof loc?.lat === "number" && typeof loc?.lng === "number") {
             setActiveAcceptedRide((prev) => {
               if (!prev) return null;
-              if (userRole === "driver") {
+              if (isActingAsDriver) {
                 if (prev.tripStage === "in_progress") return prev;
                 const distFromBookedPickupKm = haversineKm(
                   loc.lat,
@@ -469,7 +508,7 @@ export default function HomePage() {
       clearInterval(interval);
       if (es) es.close();
     };
-  }, [activeRequestId, activeDriverId, activePassengerId, userRole]);
+  }, [activeRequestId, activeDriverId, activePassengerId, userRole, currentUserId]);
 
   // Automatically acquire device GPS coordinates on page mount (once)
   useEffect(() => {
@@ -501,7 +540,13 @@ export default function HomePage() {
   useEffect(() => {
     let cancelled = false;
     syncSession().then((sessionUser) => {
-      if (cancelled || sessionUser) return;
+      if (cancelled) return;
+      if (sessionUser) {
+        if (isAdminUser(sessionUser)) {
+          router.replace("/admin");
+        }
+        return;
+      }
       try {
         window.location.replace("/login");
       } catch {
@@ -583,8 +628,16 @@ export default function HomePage() {
       if (!confirmCancel) return;
     }
 
+    const isUserDriver =
+      rideSnapshot.driverId === user?.id ||
+      (user?.role === "driver" && rideSnapshot.passengerId !== user?.id);
+
     try {
-      const res = await fetch("/api/rides/requests", {
+      const endpoint =
+        action === "complete" && isUserDriver
+          ? "/api/rides/requests/respond"
+          : "/api/rides/requests";
+      const res = await fetch(endpoint, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -601,10 +654,6 @@ export default function HomePage() {
       setActiveAcceptedRide(null);
 
       if (action === "complete") {
-        showToast("Ride Completed! 🎉", "Fare transferred successfully.", "success");
-        const isUserDriver =
-          rideSnapshot.driverId === user?.id ||
-          (user?.role === "driver" && rideSnapshot.passengerId !== user?.id);
         const counterpartyId = isUserDriver
           ? rideSnapshot.passengerId
           : rideSnapshot.driverId;
@@ -612,14 +661,56 @@ export default function HomePage() {
           ? rideSnapshot.passengerName || "Student Passenger"
           : rideSnapshot.driverName || "Student Driver";
 
-        if (counterpartyId) {
-          setRatingTarget({
+        const rTarget = counterpartyId
+          ? {
+              requestId: reqId,
+              targetUserId: counterpartyId,
+              targetName: counterpartyName,
+              targetRole: (isUserDriver ? "passenger" : "driver") as "passenger" | "driver",
+              fare: rideSnapshot.fare || "0",
+            }
+          : null;
+
+        const reqView = data.request;
+        const pMethod = (data.paymentMethod || reqView?.paymentMethod || rideSnapshot.paymentMethod || "wallet") as "wallet" | "upi";
+        const pStatus = (data.paymentStatus || reqView?.paymentStatus || "none") as "none" | "wallet_paid" | "pending" | "paid";
+        const parseFareNum = (v: unknown) => {
+          if (typeof v === "number") return Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
+          if (typeof v === "string") {
+            const n = Number(v.trim().replace(/^₹\s*/i, "").replace(/,/g, ""));
+            return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+          }
+          return 0;
+        };
+        const amtRupees =
+          parseFareNum(data.amountRupees) ||
+          parseFareNum(reqView?.amountRupees) ||
+          parseFareNum(reqView?.agreedFare) ||
+          parseFareNum(rideSnapshot.fare);
+
+        if (isUserDriver) {
+          if (pMethod === "upi") {
+            showToast("Ride Completed! 🎉", "Please collect payment via UPI QR code.", "info");
+          } else {
+            showToast("Ride Completed! 🎉", "Fare transferred to HopOn wallet.", "success");
+          }
+          if (rTarget) setPendingRatingTarget(rTarget);
+          setDriverPaymentData({
+            isOpen: true,
             requestId: reqId,
-            targetUserId: counterpartyId,
-            targetName: counterpartyName,
-            targetRole: isUserDriver ? "passenger" : "driver",
-            fare: rideSnapshot.fare || "0",
+            from: rideSnapshot.pickupLocation.name,
+            dropoff: rideSnapshot.dropoffLocation.name,
+            passengerName: rideSnapshot.passengerName,
+            fare: amtRupees > 0 ? String(amtRupees) : rideSnapshot.fare || "0",
+            amountRupees: amtRupees,
+            paymentMethod: pMethod,
+            paymentStatus: pStatus,
+            upiUri: data.upiUri || reqView?.upiUri,
+            driverQrImage: data.driverQrImage || reqView?.driverQrImage || user?.upiQrImage,
           });
+        } else {
+          showToast("Ride Completed! 🎉", "Hope you had a safe trip!", "success");
+          if (rTarget) setRatingTarget(rTarget);
         }
       } else {
         showToast("Ride Cancelled", "This ride was cancelled.", "info");
@@ -826,6 +917,23 @@ export default function HomePage() {
                 onSelectMatchingRide={setSelectedMatchingRide}
                 onRequestSeatRef={onRequestSeatRef}
                 onSearchingRidesChange={setIsRiderSearching}
+                onMatchingRidesCountChange={setMatchingRidesCount}
+                onPassengerRideCompleted={(details) => {
+                  if (details.driverId) {
+                    setRatingTarget({
+                      requestId: details.requestId,
+                      targetUserId: details.driverId,
+                      targetName: details.driverName,
+                      targetRole: "driver",
+                      fare: details.fare,
+                      pickup: details.pickup,
+                      dropoff: details.dropoff,
+                      vehicleModel: details.vehicleModel,
+                      vehicleNumber: details.vehicleNumber,
+                      paymentMethod: details.paymentMethod,
+                    });
+                  }
+                }}
               />
 
               {/* Map helper + campus schedule toggle */}
@@ -849,13 +957,15 @@ export default function HomePage() {
               <MapWrapper
                 pickup={pickup}
                 dropoff={dropoff}
-                driverCars={driverCars}
+                driverCars={matchingRidesCount > 0 ? driverCars : []}
                 userLocation={userLocation}
                 onSelectMapLocation={handleSelectMapLocation}
                 onLocateCurrentLocation={handleLocateCurrentLocation}
                 onGpsUpdate={handleDeviceGpsUpdate}
                 acceptedRideRoute={activeAcceptedRide}
+                matchingRidesCount={matchingRidesCount}
                 onClearAcceptedRoute={handleClearAcceptedRoute}
+                onCompleteAcceptedRide={() => void handleClearAcceptedRoute("complete")}
                 isDriver={
                   activeAcceptedRide
                     ? activeAcceptedRide.driverId === user?.id
@@ -1152,12 +1262,22 @@ export default function HomePage() {
                       showToast("No Active Ride", "Start or accept a ride before sharing your trip link.", "info");
                       return;
                     }
-                    const url = `${window.location.origin}/home?track=${activeAcceptedRide.requestId}`;
                     try {
+                      const res = await fetch("/api/rides/track", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ requestId: activeAcceptedRide.requestId }),
+                      });
+                      const data = await res.json().catch(() => ({}));
+                      if (!res.ok || !data.sharePath) {
+                        showToast("Could Not Share Trip", data.error || "Unable to generate share link.", "error");
+                        return;
+                      }
+                      const url = `${window.location.origin}${data.sharePath}`;
                       await navigator.clipboard.writeText(url);
                       showToast("Trip Link Copied", "Shareable tracking link copied to clipboard.", "success");
                     } catch {
-                      showToast("Share Trip", url, "info");
+                      showToast("Could Not Share Trip", "Failed to copy tracking link.", "error");
                     }
                   }}
                   className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-50 border border-sky-200 text-slate-800 text-xs font-bold shadow-2xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
@@ -1201,6 +1321,34 @@ export default function HomePage() {
       {/* Activity History Modal */}
       <ActivityModal isOpen={isActivityOpen} onClose={() => setIsActivityOpen(false)} />
 
+      {/* Driver Payment & UPI QR Modal */}
+      {driverPaymentData && (
+        <DriverPaymentModal
+          isOpen={driverPaymentData.isOpen}
+          onClose={() => {
+            setDriverPaymentData(null);
+            if (pendingRatingTarget) {
+              setRatingTarget(pendingRatingTarget);
+              setPendingRatingTarget(null);
+            }
+          }}
+          requestId={driverPaymentData.requestId}
+          from={driverPaymentData.from}
+          to={driverPaymentData.dropoff}
+          fareAmount={driverPaymentData.amountRupees}
+          paymentMethod={driverPaymentData.paymentMethod}
+          paymentStatus={driverPaymentData.paymentStatus}
+          upiUri={driverPaymentData.upiUri}
+          driverUpiId={user?.upiId}
+          driverQrImage={driverPaymentData.driverQrImage || user?.upiQrImage}
+          onPaymentConfirmed={() => {
+            setDriverPaymentData((prev) =>
+              prev ? { ...prev, paymentStatus: "paid" } : null
+            );
+          }}
+        />
+      )}
+
       {/* 2-Way Post-Ride Rating Modal */}
       {ratingTarget && (
         <RatingModal
@@ -1211,6 +1359,11 @@ export default function HomePage() {
           targetName={ratingTarget.targetName}
           targetRole={ratingTarget.targetRole}
           fare={ratingTarget.fare}
+          pickup={ratingTarget.pickup}
+          dropoff={ratingTarget.dropoff}
+          vehicleModel={ratingTarget.vehicleModel}
+          vehicleNumber={ratingTarget.vehicleNumber}
+          paymentMethod={ratingTarget.paymentMethod}
         />
       )}
 

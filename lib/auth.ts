@@ -13,6 +13,16 @@ export interface User {
   vehicleModel?: string;
   vehicleNumber?: string;
   vehicleType?: string;
+  upiId?: string;
+  upiQrImage?: string;
+  isAdmin?: boolean;
+}
+
+export const ADMIN_EMAIL = "admin@kristujayanti.com";
+
+export function isAdminUser(user?: { email?: string; isAdmin?: boolean } | null): boolean {
+  if (!user) return false;
+  return Boolean(user.isAdmin || user.email?.trim().toLowerCase() === ADMIN_EMAIL);
 }
 
 export const DEMO_ACCOUNT = {
